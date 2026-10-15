@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "providers": [
+    {"name":"OpenAI","domains":["api.openai.com"],"sdk":["openai.resources","openai-python"],"endpoints":["/v1/chat/completions","/v1/responses"]},
+    {"name":"Anthropic","domains":["api.anthropic.com"],"sdk":["anthropic-sdk"],"endpoints":["/v1/messages"]},
+    {"name":"Google Gemini","domains":["generativelanguage.googleapis.com"],"sdk":["google.generativeai"],"endpoints":["generateContent"]},
+    {"name":"Azure AI","domains":["openai.azure.com","services.ai.azure.com"],"sdk":["azure.ai.inference"],"endpoints":["/openai/deployments/"]},
+    {"name":"Hugging Face","domains":["api-inference.huggingface.co","router.huggingface.co"],"sdk":["huggingface_hub"],"endpoints":[]},
+    {"name":"Mistral","domains":["api.mistral.ai"],"sdk":["mistralai"],"endpoints":[]},
+    {"name":"Cohere","domains":["api.cohere.com","api.cohere.ai"],"sdk":["cohere.client"],"endpoints":[]},
+    {"name":"Groq","domains":["api.groq.com"],"sdk":["groq.resources"],"endpoints":[]},
+    {"name":"OpenRouter","domains":["openrouter.ai"],"sdk":[],"endpoints":["/api/v1/chat/completions"]},
+    {"name":"Together AI","domains":["api.together.xyz"],"sdk":["together.resources"],"endpoints":[]},
+    {"name":"Local inference","domains":[],"sdk":["ollama","llama.cpp","onnxruntime","transformers","torch.dll","tensorflow",".gguf",".safetensors"],"endpoints":["/api/generate","/api/chat"]}
+  ]
+}

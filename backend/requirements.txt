@@ -1,0 +1,15 @@
+fastapi==0.141.1
+uvicorn[standard]==0.35.0
+pydantic-settings==2.10.1
+sqlalchemy==2.0.43
+psycopg[binary]==3.2.9
+alembic==1.16.5
+celery[redis]==5.5.3
+boto3==1.40.25
+httpx==0.28.1
+python-multipart==0.0.32
+pefile==2024.8.26
+yara-python==4.5.4
+cryptography==50.0.1
+pytest==9.1.1
+starlette==1.7.0
