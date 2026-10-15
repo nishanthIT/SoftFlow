@@ -25,14 +25,14 @@ The instructions below target Linux with Bash, including Kali/Debian and Ubuntu.
 Replace `YOUR_REPOSITORY_URL` with the actual Git repository URL. The project does not contain a published repository URL to substitute automatically.
 
 ```bash
-git clone YOUR_REPOSITORY_URL Luna
-cd Luna
+git clone https://github.com/nishanthIT/SoftFlow
+cd softFlow
 ```
 
 If you already have the folder, simply enter it:
 
 ```bash
-cd ~/Luna
+cd ~/softFlow
 ```
 
 Check whether it is a Git checkout:
