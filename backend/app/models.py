@@ -28,6 +28,7 @@ class Job(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
     status: Mapped[str] = mapped_column(String(20), default='QUEUED', index=True)
     consent: Mapped[bool] = mapped_column(Boolean, default=False)
+    submitted_filename: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

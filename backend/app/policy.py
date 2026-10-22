@@ -11,6 +11,9 @@ def domain_match(value, domain):
     return h == domain or h.endswith('.'+domain)
 
 def network(sandbox):
+    if sandbox.get('source') == 'cuckoo3':
+        from .cuckoo3_results import network as normalize
+        return normalize(sandbox)
     raw = sandbox.get('report',{}).get('network')
     if not isinstance(raw,dict) or not any(k in raw for k in ['dns','http','https','tcp','udp']): return None
     events=[]
@@ -23,6 +26,9 @@ def network(sandbox):
             'ips':sorted({str(e['ip']) for e in events if e.get('ip')}),'capture_scope':'Sandbox report metadata; encrypted request bodies are not available'}
 
 def behavior(sandbox):
+    if sandbox.get('source') == 'cuckoo3':
+        from .cuckoo3_results import behavior as normalize
+        return normalize(sandbox)
     report = sandbox.get('report',{})
     if 'behavior' not in report: return None
     b = report['behavior']; events=[]
@@ -66,6 +72,7 @@ def ai_detect(static, net, static_ok, network_ok, observed_behavior=None):
             'limitations':'Static strings and SDKs do not prove usage. DNS alone does not prove an API call. Encrypted traffic and local model execution may be unobservable. Model and request content are not inferred.'}
 
 def verdict(results):
+    from .approval import criteria
     reasons=[]; score=0
     def add(points,source,evidence):
         nonlocal score
@@ -82,10 +89,17 @@ def verdict(results):
     if yara: add(25,'yara',{'rules':[m['rule'] for m in yara]})
     high=[e for e in results.get('behavior',{}).get('data',{}).get('events',[]) if e['severity']=='high']
     if high: add(30,'behavior',high[:10])
-    required=['static','yara','virustotal','sandbox','behavior','network']
+    sandbox=results.get('sandbox',{})
+    if sandbox.get('status')=='COMPLETED' and sandbox.get('data',{}).get('source')=='cuckoo3':
+        scores=[item.get('post',{}).get('score',0) for item in sandbox['data'].get('report',{}).get('tasks',[])]
+        severity=max((s for s in scores if isinstance(s,(int,float))),default=0)
+        if severity>=9: add(70,'sandbox',f'Cuckoo 3 reported score {severity}/10')
+        elif severity>=6: add(30,'sandbox',f'Cuckoo 3 reported score {severity}/10')
+        elif severity>0: add(10,'sandbox',f'Cuckoo 3 reported score {severity}/10; review low-severity findings')
+    required=['static','yara','sandbox','behavior','network']+(['virustotal'] if settings.approval_require_reputation else [])
     coverage=all(results.get(k,{}).get('status')=='COMPLETED' for k in required)
-    trusted_clean=stats.get('harmless',0)>0 or stats.get('undetected',0)>=20
+    trusted_clean=not settings.approval_require_reputation or stats.get('harmless',0)+stats.get('undetected',0)>=settings.approval_min_reputation_engines
     state='LIKELY_MALICIOUS' if score>=60 else 'SUSPICIOUS' if score>=20 else 'LIKELY_BENIGN' if coverage and trusted_clean else 'INCONCLUSIVE'
-    gaps=[{'engine':k,'status':v['status'],'reason':v.get('reason')} for k,v in results.items() if v['status']!='COMPLETED']
-    return {'security':state,'score':min(score,100),'confidence':'MEDIUM' if state!='INCONCLUSIVE' else 'LOW','reasons':reasons,'coverage_gaps':gaps,
-            'policy_version':'1.0','ai':results.get('ai',{}).get('data',{}),'explanation':'No adverse evidence is not proof of safety. Incomplete analysis cannot yield a likely-benign verdict. AI indicators never increase the security score.'}
+    gaps=[{'engine':k,'status':v['status'],'reason':v.get('reason')} for k,v in results.items() if k not in ['verdict','report'] and v['status']!='COMPLETED']
+    return {'security':state,'score':min(score,100),'confidence':'MEDIUM' if state!='INCONCLUSIVE' else 'LOW','reasons':reasons,'coverage_gaps':gaps,'approval_policy':criteria(),
+            'policy_version':'1.1','ai':results.get('ai',{}).get('data',{}),'explanation':'No adverse evidence is not proof of safety or absence of vulnerabilities. Incomplete required analysis cannot yield a likely-benign verdict. AI indicators never increase the security score.'}

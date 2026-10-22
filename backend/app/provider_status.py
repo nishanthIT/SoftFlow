@@ -7,7 +7,7 @@ NAMES={'virustotal':'VirusTotal','hybrid-analysis':'Hybrid Analysis','sandbox':'
 _CACHE={};_LOCK=threading.Lock()
 
 def sanitize(value):
-    secrets=[settings.virustotal_api_key,settings.hybrid_analysis_api_key,settings.cuckoo_api_token,settings.auth_secret,settings.admin_password,settings.minio_secret_key]
+    secrets=[settings.virustotal_api_key,settings.hybrid_analysis_api_key,settings.cuckoo_api_token,settings.minio_secret_key]
     if isinstance(value,str):
         for secret in secrets:
             if secret and len(secret)>7:value=value.replace(secret,'[REDACTED]')
@@ -42,11 +42,12 @@ def diagnostic(name,error):
 def check(name,refresh=False):
     key={'virustotal':settings.virustotal_api_key,'hybrid-analysis':settings.hybrid_analysis_api_key,'sandbox':settings.cuckoo_api_token}.get(name,'')
     configured=bool(settings.cuckoo_api_url) if name=='sandbox' else bool(key)
-    identity=(name,hashlib.sha256(key.encode()).hexdigest(),settings.cuckoo_api_url,settings.sandbox_kind)
+    identity=(name,hashlib.sha256(key.encode()).hexdigest(),settings.cuckoo_api_url,settings.sandbox_kind,settings.sandbox_isolation_confirmed,settings.sandbox_os_version)
     with _LOCK:
         cached=_CACHE.get(identity)
         if not refresh and cached and time.monotonic()-cached[0]<settings.provider_health_ttl:return cached[1]
     result={'name':NAMES[name],'id':name,'configured':configured,'checked_at':None}
+    if name=='sandbox':result.update(execution_ready=False,isolation_confirmed=settings.sandbox_isolation_confirmed,kind=settings.sandbox_kind)
     from datetime import datetime,timezone
     if not configured:result.update(status='NOT_CONFIGURED',message=f'{NAMES[name]} '+('API URL is not configured' if name=='sandbox' else 'API key is not configured'))
     else:
@@ -66,13 +67,25 @@ def check(name,refresh=False):
             result.update(status='CONNECTED',message=f'{NAMES[name]} connected; authentication accepted')
             if name=='sandbox':
                 if settings.sandbox_kind=='cuckoo3':
-                    ready=bool(payload) # Available platforms come from active node state.
+                    from .providers import windows_available
+                    ready=windows_available(payload)
+                    result['available_platforms']=payload
                 else:ready=bool(payload.get('machines',{}).get('available',0) or payload.get('data',{}).get('machines',{}).get('available',0))
                 result.update(execution_ready=ready and settings.sandbox_isolation_confirmed,isolation_confirmed=settings.sandbox_isolation_confirmed)
-                if not ready:result.update(status='NO_ANALYSIS_MACHINE',message='Cuckoo API connected, but no Windows analysis machine is available')
+                if not ready:result.update(status='NO_ANALYSIS_MACHINE',message='Cuckoo API connected, but no matching Windows analysis machine is available')
                 elif not settings.sandbox_isolation_confirmed:result.update(status='ISOLATION_REQUIRED',message='Cuckoo API connected; VM isolation and snapshot restoration must be verified before execution')
         except Exception as e:
             detail=diagnostic(name,e);result.update(status=detail['code'],message=detail['message'],retry_after_seconds=detail['retry_after_seconds'])
+            # The pinned Cuckoo API raises HTTP 500 for platform discovery
+            # until core has generated its first node inventory. Distinguish
+            # an authenticated API with no scheduler from bad credentials.
+            if name=='sandbox' and settings.sandbox_kind=='cuckoo3' and isinstance(e,httpx.HTTPStatusError) and e.response.status_code>=500:
+                try:
+                    probe=httpx.get(settings.cuckoo_api_url.rstrip('/')+'/analyses/',headers={'Authorization':'Token '+key},timeout=min(settings.request_timeout,10))
+                    probe.raise_for_status()
+                    if isinstance(probe.json().get('analyses'),list):
+                        result.update(status='CORE_NOT_READY',message='Cuckoo API authenticated, but core has not supplied a usable machine inventory. Check Cuckoo core logs and host/VM prerequisites.')
+                except Exception:pass
         result['checked_at']=datetime.now(timezone.utc).isoformat()
     with _LOCK:_CACHE[identity]=(time.monotonic(),result)
     return result

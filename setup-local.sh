@@ -2,7 +2,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 if [[ ! -x .venv-local/bin/python ]]; then
-  python3.13 -m venv .venv-local
+  "${APP_PYTHON:-python3}" -m venv .venv-local
 fi
 .venv-local/bin/python -m pip install -r backend/requirements.txt
 npm ci --prefix frontend

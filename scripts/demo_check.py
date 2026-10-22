@@ -7,7 +7,6 @@ root=Path(__file__).resolve().parents[1];v=dotenv_values(root/'.env')
 base='http://127.0.0.1:'+v.get('API_PORT','8100')
 out=root/'.local/demo';out.mkdir(exist_ok=True)
 with httpx.Client(base_url=base,timeout=60) as c:
-    r=c.post('/api/auth/login',json={'username':v['ADMIN_USERNAME'],'password':v['ADMIN_PASSWORD']});r.raise_for_status()
     health=c.get('/api/providers/health');health.raise_for_status()
     print('Provider health:',json.dumps(health.json()),flush=True)
     if '--health-only' in sys.argv:sys.exit()

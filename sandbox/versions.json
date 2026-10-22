@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/cert-ee/cuckoo3.git",
+  "revision": "86be764b78d08979b15aa0b61f76ee7d67c4c17b",
+  "version": "3.0.1",
+  "python": "3.10",
+  "python_patch": "3.10.19",
+  "uv_version": "0.9.5",
+  "vmcloak_repository": "https://github.com/cert-ee/vmcloak.git",
+  "vmcloak_revision": "8f10dfda47edfed63699bc9a9916071e25c607bf",
+  "windows_iso_url": "https://cuckoo-hatch.cert.ee/static/vm/Win10_1703_English_x64.iso",
+  "windows_iso_sha1": "ce8005a659e8df7fe9b080352cb1c313c3e9adce",
+  "documented_host": "Ubuntu 22.04",
+  "packages": ["common", "processing", "machineries", "web", "node", "core"]
+}

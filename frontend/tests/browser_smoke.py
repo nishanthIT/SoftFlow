@@ -11,8 +11,7 @@ with sync_playwright() as p:
     page.on('pageerror',lambda e:errors.append(str(e)))
     def api_fixture(route):
         path=route.request.url.split(':3000')[-1]
-        if path=='/api/auth/me': data={'username':'layout-test','role':'admin'}
-        elif path.startswith('/api/samples'): data=[]
+        if path.startswith('/api/samples'): data=[]
         elif path=='/api/settings':data={'providers':[{'name':'VirusTotal','configured':False},{'name':'Hybrid Analysis','configured':False},{'name':'CAPE / Cuckoo','configured':False}], 'external_uploads_enabled':False,'max_upload_mb':32}
         else:route.fulfill(status=404,json={'detail':'Unavailable in layout test'});return
         route.fulfill(status=200,content_type='application/json',body=json.dumps(data))

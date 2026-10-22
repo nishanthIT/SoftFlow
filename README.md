@@ -1,428 +1,424 @@
-# SentinelScan — setup and usage guide
+# SentinelScan — setup and operation
 
-Analyze Windows EXE files with real static analysis, YARA, VirusTotal, Hybrid Analysis, and an independently configured Windows sandbox. Results come from backend analysis and provider responses; missing engines remain unavailable, never “clean.”
+Analyze Windows EXE files with static inspection, YARA, reputation providers, and an isolated Cuckoo guest. Review the evidence, record an approval decision, and download the report. **Application login is not required.** Everyone who can reach the frontend can access the workspace and record decisions.
 
-## Choose how to run
+## Choose your setup path
 
-| | Without Docker | With Docker Compose |
-|---|---|---|
-| Browser URL | http://localhost:3100 | http://localhost:8080 |
-| Start | `./start.sh` | `sudo docker compose up -d --build` |
-| Stop | `./stop.sh` | `sudo docker compose down` |
-| Database/queue | Local PostgreSQL and Redis processes | PostgreSQL and Redis containers |
-| Sample/report storage | Private `.local/storage/` directory | MinIO named volume |
-| Main configuration | Root `.env` | Root `.env` |
-| Windows sandbox included? | No | No |
+| Situation | Follow |
+|---|---|
+| This existing `/home/n1sh/Luna` installation | [Finish the existing installation](#finish-the-existing-installation) |
+| New Linux checkout, without Docker | [Local setup, step by step](#local-setup-step-by-step) |
+| Application services in Docker | [Docker alternative](#docker-alternative) |
+| Application already configured and verified | [Daily startup and LAN access](#daily-startup-and-lan-access) |
 
-**Use one mode at a time.** The modes need different database URLs and storage settings. `start.sh` is the non-Docker launcher; it does not start Docker. Neither method requires an existing database: the launcher or Compose creates the application's database on first startup.
+Use one application runtime mode at a time. Local and Docker modes use different connection URLs and separate data stores. Neither application startup nor Docker Compose creates a Windows analysis guest automatically.
 
-The instructions below target Linux with Bash, including Kali/Debian and Ubuntu. Native Windows/macOS startup is not supported by the local process manager.
+## Finish the existing installation
 
-## 1. Get the project or pull updates
-
-### First download
-
-Replace `YOUR_REPOSITORY_URL` with the actual Git repository URL. The project does not contain a published repository URL to substitute automatically.
+Run commands from the repository root:
 
 ```bash
-git clone https://github.com/nishanthIT/SoftFlow
-cd softFlow
+cd /home/n1sh/Luna
 ```
 
-If you already have the folder, simply enter it:
+The last verification on **22 October 2026** confirmed application/LAN operation, installed Cuckoo packages, KVM, and the downloaded Windows media. The isolated host bridge/capture permissions and Windows guest/snapshot were still missing. See [verification details](docs/LOCAL_STATUS.md); run the checks below to determine the current state.
+
+To load the latest application changes:
 
 ```bash
-cd ~/softFlow
+./stop.sh
+./start
 ```
 
-Check whether it is a Git checkout:
+To finish the missing Cuckoo infrastructure, stop application services first, then follow **steps 4–7** below. The essential host setup sequence is:
 
 ```bash
-git rev-parse --is-inside-work-tree
+./stop.sh
+.venv-local/bin/python scripts/cuckoo_guest.py host-plan
+sudo python3 scripts/prepare_cuckoo_host.py --install-service
+.venv-local/bin/python scripts/cuckoo_local.py host-config
+.venv-local/bin/python scripts/cuckoo_guest.py repair
+.venv-local/bin/python scripts/cuckoo_guest.py download
+.venv-local/bin/python scripts/cuckoo_guest.py build
 ```
 
-If it says “not a git repository,” this is a copied/downloaded folder. You can still run the application, but cannot use `git pull` there. Clone into a **new directory** to obtain a Git checkout; preserve your existing `.env` and analysis data. Do not overwrite the working folder or create a new empty Git repository just to make `pull` work.
+`download` verifies and reuses matching media. Run `build` only when a guest is still needed; it does not overwrite or repair an existing partial VM automatically. After a successful build, complete isolation/snapshot validation, configuration, startup, and the real execution check in steps 6–7. Installing the bridge alone does not make Cuckoo ready.
 
-### Update an existing Git checkout
+Keep the existing `.env`, `.local/`, database, and sample storage. Do not copy `.env.example` over this installation or reinstall an existing VM just to restart the application.
 
-Stop the application using the command for your current mode. Back up `.env` and your database/storage before updating. Then:
+## Local setup, step by step
 
-```bash
-git status --short
-git pull --ff-only
-```
+The local launcher targets Linux. Host package scripts support Debian, Kali, and Ubuntu; the pinned Cuckoo baseline documents Ubuntu 22.04. Guest-build compatibility on other distributions still needs verification. Run setup and startup as your normal user; use `sudo` only for the host commands explicitly shown. PostgreSQL initialization cannot run as root.
 
-If Git reports local changes or divergent branches, review and commit/stash your changes before proceeding. Do not discard them with a hard reset. After pulling, follow the update commands in the appropriate section below. Existing analyses are not moved automatically between Docker and local storage.
+### 1. Install application prerequisites
 
-## 2. Run WITHOUT Docker
-
-### Step 1 — install prerequisites
-
-The local launcher needs PostgreSQL server binaries, Redis, Node.js/npm, and a Python virtual environment. Do not run the launcher as root: PostgreSQL's `initdb` refuses root execution.
-
-On a Debian-family system:
+From your project directory:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git build-essential python3-dev python3-venv postgresql redis-server nodejs npm
+sudo apt-get install -y git build-essential python3-dev python3-venv \
+  postgresql redis-server nodejs npm curl openssl iproute2
 python3 --version
 node --version
 npm --version
-redis-server --version
 ```
 
-Use Node.js 22 for consistency with the frontend's container environment. If your distribution installs an older Node version, install Node 22 through your usual trusted Node version manager before continuing.
-
-`setup-local.sh` creates a **Python 3.13** virtual environment if none exists. On systems providing that version:
+Use Python 3.10 or newer for the application dependencies; this checkout was tested locally with Python 3.13, and the backend image uses 3.12. Use **Node.js 22**, matching the frontend image. If your distribution installs a different Node major version, install/select Node 22 before continuing. For an already installed nvm:
 
 ```bash
-sudo apt-get install -y python3.13 python3.13-venv python3.13-dev
+nvm install 22
+nvm use 22
 ```
 
-Ubuntu 24.04 normally provides Python 3.12 instead. You can create the environment with Python 3.12 first (also the backend container's Python version), and setup will reuse it:
+Cuckoo has its own **Python 3.10** environment, prepared in step 3. Do not install its lockfile into the application's environment or replace the operating system's Python.
+
+### 2. Prepare the application
 
 ```bash
-python3.12 -m venv .venv-local
+bash setup-local.sh
 ```
 
-Do not replace the operating system's Python or use `sudo pip`. If `.venv-local` already exists, check its interpreter with `.venv-local/bin/python --version`; setup reuses that environment.
+This installs Python dependencies into `.venv-local`, installs frontend packages, and creates/updates the root `.env` for local PostgreSQL, Redis, and private filesystem storage. You do not need to create the database or run migrations manually; `./start` does that.
 
-### Step 2 — install project dependencies and generate configuration
+To select a specific application Python on a **fresh** checkout, use `APP_PYTHON=python3.12 bash setup-local.sh`, for example. Setup reuses an existing `.venv-local`; changing `APP_PYTHON` does not replace it.
+
+Setup generates missing database/Redis passwords, preserves provider keys and external-sharing policy, and saves the first previous configuration to `.local/.env.before-local`. Existing initialized databases retain their passwords. There is no application username/password to configure.
+
+You can now run `./start` for static analysis and provider lookups, but dynamic analysis remains unavailable until steps 3–7 are complete. Stop with `./stop.sh` before preparing/reconfiguring the guest infrastructure.
+
+### 3. Install Cuckoo 3 and VMCloak
+
+```bash
+sudo bash scripts/install-cuckoo-system.sh
+sudo apt-get install -y gcc-mingw-w64-x86-64
+bash setup-cuckoo.sh
+.venv-local/bin/python scripts/cuckoo_guest.py install
+```
+
+The host installer supplies QEMU, capture tools, native build dependencies, and firewall utilities. MinGW compiles the harmless verification program; it is optional if you supply your own harmless Windows executable with `verify_sandbox.py --sample`.
+
+`setup-cuckoo.sh` installs the pinned Cuckoo release and dependencies, creates its working directory/API database, installs monitor/signature files for a new working directory, and saves a generated API token in `.env`. It enables managed local Cuckoo startup. If Python 3.10 is unavailable, the default bootstrap installs a pinned interpreter under `.local/python/` without modifying system Python.
+
+| Component | Default location |
+|---|---|
+| Application Python | `.venv-local/` |
+| Cuckoo Python 3.10 | `.local/cuckoo-venv/` |
+| Cuckoo configuration/data | `.local/cuckoo/` |
+| VMCloak Python | `.local/vmcloak-venv/` |
+| VMCloak images/snapshots | `.local/vmcloak/` |
+| Cuckoo dependency lockfile | `sandbox/requirements.lock` |
+| VMCloak dependency lockfile | `sandbox/vmcloak-requirements.lock` |
+| Pinned versions | `sandbox/versions.json` |
+
+Network access is needed for package/source downloads. Existing Cuckoo configurations and credentials are preserved. A different interpreter or locally modified source checkout can cause setup to stop rather than silently overwrite it.
+
+### 4. Configure the isolated guest network
+
+Hardware virtualization must be enabled in firmware, and Linux must expose `/dev/kvm`:
+
+```bash
+ls -l /dev/kvm
+.venv-local/bin/python scripts/cuckoo_guest.py host-plan
+sudo python3 scripts/prepare_cuckoo_host.py --install-service
+.venv-local/bin/python scripts/cuckoo_local.py host-config
+ip -br address show ss-cuckoo0
+```
+
+The default bridge is `ss-cuckoo0`, with host/result-server address `192.168.30.1/24`. Host setup blocks guest forwarding and restricts guest-to-host access to the result server and replies. It also configures a restricted bridge helper, capture permissions, and KVM access for your normal user. It preserves other firewall tables and rejects overlap with another host interface's subnet.
+
+`--install-service` requires systemd. It installs a root-owned boot service to restore these runtime settings after reboot; the application processes themselves are still started with `./start`. On a host without systemd, omit the flag and rerun host setup after each reboot before starting Cuckoo.
+
+If the default guest subnet overlaps your LAN/VPN, choose an unused private subnet by editing `CUCKOO_GUEST_NETWORK`, `CUCKOO_RESULTSERVER_IP`, `CUCKOO_BUILD_IP`, and `CUCKOO_GUEST_IP` in `.env` **before** generating the host plan. All guest addresses must be in that subnet. Keep the guest bridge separate from the application LAN.
+
+### 5. Create and import the Windows guest
+
+```bash
+.venv-local/bin/python scripts/cuckoo_guest.py download
+.venv-local/bin/python scripts/cuckoo_guest.py build
+```
+
+Use appropriately licensed Windows media. The helper downloads/verifies the pinned media, extracts it, initializes a Windows guest through VMCloak, creates a snapshot, and imports the resulting machine into Cuckoo. Defaults are 2 guest CPUs, 4 GiB RAM, and a 64 GB virtual disk. Allow host capacity for the guest, the application, extracted installation media, base disk, and snapshot files.
+
+The initial build uses `192.168.30.2`; the snapshot sequence starts at `192.168.30.10`. `CUCKOO_RAM_MB`, `CUCKOO_CPUS`, and `CUCKOO_DISK_GB` can override guest resources. Build failures must be inspected before retrying: existing partial images are not deleted automatically. See [sandbox setup](sandbox/README.md#managed-local-cuckoo-3-workflow) for recovery and alternative infrastructure.
+
+### 6. Verify isolation and configure execution
+
+Check guest-agent reachability, monitor/result-server connectivity, clean snapshot restoration, and that the guest cannot reach the application LAN. The supplied guest network blocks Internet access, which limits observable network behavior. **A generated snapshot or a successful API health request does not verify these properties.**
+
+Edit the existing `.env` locally:
+
+```bash
+nano .env
+```
+
+For the managed local installation, confirm these values (preserve the token generated in step 3):
+
+```dotenv
+SANDBOX_KIND=cuckoo3
+CUCKOO_AUTO_START=true
+CUCKOO_API_URL=http://127.0.0.1:8090
+CUCKOO_CWD=.local/cuckoo
+CUCKOO_VENV=.local/cuckoo-venv
+SANDBOX_PLATFORM=windows
+SANDBOX_OS_VERSION=10
+SANDBOX_ANALYSIS_TIMEOUT=120
+PROVIDER_TIMEOUT=900
+FRONTEND_HOST=0.0.0.0
+```
+
+Only after checking isolation and restoration, change `SANDBOX_ISOLATION_CONFIRMED` from `false` to `true`. No setup script sets this attestation for you. Until it is true, managed startup does not start the Cuckoo core and file execution is blocked.
+
+Run the prerequisite check:
+
+```bash
+.venv-local/bin/python scripts/cuckoo_local.py doctor
+```
+
+Continue to execution testing only when the JSON says `"ready": true`. Failures identify missing dependencies, capture/KVM permissions, monitor files, bridge/result-server configuration, VM/snapshot files, or attestation. A ready doctor is still not proof that the guest has executed a sample.
+
+### 7. Start and verify the complete workflow
+
+```bash
+./start
+curl --fail http://127.0.0.1:3100/health
+.venv-local/bin/python scripts/verify_sandbox.py
+```
+
+If the app was already running before your configuration edits, run `./stop.sh` first. The verification command compiles and submits the included harmless Windows executable, waits for actual processing, validates task/sample/report identity, and checks behavioral/network evidence. It never runs the executable on the host.
+
+Successful dynamic verification requires **exit code 0**, `"workflow_verified": true`, and `"sandbox_verified": true` in `.local/verification/status.json`. The report is saved to `.local/verification/report.json`. Exit code 2 means execution is not verified; exit code 1 indicates a verification error. `--allow-unavailable` can exercise the partial workflow but still returns 2 without dynamic execution.
+
+After successful setup, set `CUCKOO_REQUIRED=true` if startup should fail whenever Cuckoo is unavailable. The default `false` allows the app to start with explicit dynamic-analysis gaps. This option only applies when `CUCKOO_AUTO_START=true`.
+
+## Daily startup and LAN access
 
 From the project root:
 
 ```bash
-bash setup-local.sh
+./start
 ```
 
-This installs Python dependencies and frontend packages, then configures `.env`. It:
+`./start.sh` is equivalent. If file permissions were lost, use `bash start.sh`. The command is `./start`, not `/start` or a browser route. It starts PostgreSQL, Redis, migrations, the configured local Cuckoo API/core, FastAPI, Celery worker/beat, and Next.js. It checks backend dependencies, the frontend API proxy, and worker readiness. Already running managed processes are reused; restart to load backend or `.env` changes.
 
-- Generates database/Redis passwords, `AUTH_SECRET`, and `ADMIN_PASSWORD` when absent or still marked `CHANGE_ME`.
-- Preserves existing provider keys and external-upload consent policy.
-- Sets local database/Redis URLs and private filesystem storage; MinIO is not required in this mode.
-- Saves the first previous configuration to `.local/.env.before-local` if `.env` already existed.
+Open `http://HOST_LAN_IP:3100` on the other machine. Use the LAN URL printed by startup, or inspect the active Wi-Fi/Ethernet interface with `ip -br -4 address`. For example, if that interface has `172.20.10.3`, open `http://172.20.10.3:3100`. The address can change after reconnecting; do not use a Docker, VPN, or guest-bridge address unless that network is the intended client network.
 
-Do **not** copy `.env.example` over an existing working `.env`.
-
-### Step 3 — configure optional providers and find your login
-
-Open the configuration locally:
-
-```bash
-nano .env
-```
-
-Find `ADMIN_USERNAME` (normally `admin`) and `ADMIN_PASSWORD`. Use those values to log in. There is no universal default password. The application's password is different from your computer's `sudo` password. Do not share the file or include it in screenshots.
-
-Add provider keys if needed:
-
-```dotenv
-VIRUSTOTAL_API_KEY=your_virustotal_key
-HYBRID_ANALYSIS_API_KEY=your_hybrid_analysis_key
-```
-
-Leave unused providers blank. See the provider section below for submission consent and sandbox setup.
-
-### Step 4 — start the application
-
-```bash
-./start.sh
-```
-
-If executable permissions were lost during copying, use `bash start.sh` (and `bash stop.sh` when stopping).
-
-The launcher initializes PostgreSQL, creates the database, starts Redis, applies migrations, and starts FastAPI, the Celery worker/scheduler, and Next.js. It leaves these processes running in the background.
-
-Open **http://localhost:3100** and sign in with the credentials from `.env`.
-
-### Step 5 — check health and logs
-
-```bash
-.venv-local/bin/python scripts/local.py status
-curl --fail http://127.0.0.1:8100/health
-tail -n 80 .local/logs/api.log
-tail -n 80 .local/logs/worker.log
-tail -n 80 .local/logs/frontend.log
-```
-
-Default ports:
-
-| Service | Local address |
+| Service | Local-mode binding |
 |---|---|
-| Frontend | `127.0.0.1:3100` |
+| Browser/frontend | `0.0.0.0:3100` by default |
 | FastAPI | `127.0.0.1:8100` |
+| Cuckoo 3 management API | `127.0.0.1:8090` |
 | PostgreSQL | `127.0.0.1:55432` |
 | Redis | `127.0.0.1:56379` |
 
-The PostgreSQL/Redis ports are fixed in the current launcher. Changing only their URLs will not change the launched server ports. Frontend/API port changes also require matching `ALLOWED_ORIGINS` and `API_INTERNAL_URL` configuration.
+`FRONTEND_HOST` may restrict the listener to one host interface. Permit the frontend port from your intended LAN in the host firewall, and ensure Wi-Fi client isolation allows peer access. Keep the database, queue, Cuckoo management API and guest network private. The application has no login, so LAN reachability grants workspace access.
 
-### Step 6 — stop, restart, or update
+Uploads, events, decisions, reports, and API documentation use the same frontend origin. Next proxies relative `/api/...` requests to the backend; no remote browser API URL needs to point at `localhost`. The backend accepts same-origin proxy writes and rejects foreign browser origins. Open API documentation at `http://HOST_LAN_IP:3100/api/docs`.
 
-Stop:
+```bash
+# Run from the host.
+.venv-local/bin/python scripts/local.py status
+curl --fail http://127.0.0.1:3100/health
+curl --fail http://127.0.0.1:3100/api/providers/health
+
+# Stop or restart after editing backend code/.env.
+./stop.sh
+./start
+```
+
+On the second machine, test `curl --fail http://HOST_LAN_IP:3100/health` or open that address in a browser. A successful request to the LAN IP from the host alone does not prove peer-to-peer connectivity.
+
+`API_PORT`, `FRONTEND_PORT`, `LOCAL_POSTGRES_PORT`, and `LOCAL_REDIS_PORT` control local ports. After changing database/queue ports, stop the app and run `.venv-local/bin/python scripts/configure_local.py` to align connection URLs. Startup derives `API_INTERNAL_URL` from `API_PORT`. Substitute your configured frontend port in these examples if it is not 3100.
+
+## Updates, logs and existing data
+
+After reviewing/pulling code updates, refresh application dependencies and restart:
 
 ```bash
 ./stop.sh
-```
-
-Restart after editing `.env`:
-
-```bash
-./stop.sh
-./start.sh
-```
-
-After pulling code updates:
-
-```bash
 bash setup-local.sh
-./start.sh
+./start
 ```
 
-Stop before updating. Setup refreshes dependencies; startup applies migrations. Local data lives under `.local/`, including PostgreSQL, Redis persistence, samples/reports, and logs. Do not delete `.local/` to fix a startup problem.
-
-## 3. Run WITH Docker Compose
-
-### Step 1 — check Docker prerequisites
-
-Install Docker Engine and the Compose v2 plugin for your distribution, then verify:
+Only rerun Cuckoo/VMCloak installers when those components need updating; use the repository's pinned versions. Routine application updates do not require rebuilding a guest.
 
 ```bash
-sudo docker version
-sudo docker compose version
+tail -n 80 .local/logs/api.log
+tail -n 80 .local/logs/worker.log
+tail -n 80 .local/logs/frontend.log
+tail -n 80 .local/logs/cuckoo-api.log
+tail -n 80 .local/logs/cuckoo-core.log
 ```
 
-Use the distribution-specific Docker installation instructions; do not run Ubuntu repository commands on Kali/Debian. This guide assumes the commands above work. Run all Compose commands from the project root. `sudo` prompts for your computer password, never the application's password.
+Back up the database, sample/report storage, guest artifacts and `.env` before migration or infrastructure changes. Do not delete `.local/` to repair startup. Existing jobs and historical audit actors remain; new actions use the unauthenticated shared `LAN workspace` actor. The old application username/password/session settings are unused. Provider and database credentials remain required and must stay private.
 
-### Step 2 — create a Docker configuration
+## Workflow and approval
 
-For a **fresh checkout without an existing `.env`**:
+1. Upload a Windows x86/x64 `.exe`. Unsupported extensions, DLLs, architectures, malformed headers, and excessive uploads receive explicit errors. Duplicate bytes retain their sample history and get a new analysis ID with their submitted filename.
+2. PostgreSQL durably records the job; Celery beat dispatches it. Workers recheck sample hashes and persist each stage's timestamps, status, evidence, and errors.
+3. Cuckoo 3 submission uses `/submit/file`, Token authentication, a matching Windows platform/version, and a configured execution deadline. Its analysis ID and task IDs are retained. Completed reports must match the submitted SHA-256 and reported task identities. Unknown POST outcomes are never blindly resubmitted.
+4. The UI receives persisted status through SSE with polling fallback. Failed/unavailable/timed-out engines remain visible; a completed job can have coverage gaps.
+5. Malware scoring and approval are separate. An approval recommendation includes criteria, findings, coverage gaps, reasons, and limitations. Record an explicit decision and reason in the analysis page. Approving through the API is also blocked unless the recommendation is **Approve**. Decision history is append-only in the existing review table.
+6. Export JSON or print the report. JSON includes every operation, source evidence, policy snapshot, recommendation, current decision history, errors, and limitations. Stored analysis evidence is unchanged by later decisions. An unavailable report store produces an explicit error.
+
+| Recommendation | Criteria |
+|---|---|
+| Approve | Completed job, required engines with usable evidence, no failed/timed-out stage, likely-benign malware assessment, no adverse findings, score within acceptance threshold, and configured reputation support |
+| Reject | Complete required evidence and score at or above rejection threshold |
+| Review required | Incomplete, unsupported, failed, timed out, missing/empty evidence, inconclusive assessment, intermediate risk, or insufficient reputation |
+
+Configuration is captured in each new verdict. Changing it does not silently change existing recommendations. Historical jobs predating policy snapshots use the current policy when viewed.
+
+```dotenv
+APPROVAL_MAX_SCORE=0
+APPROVAL_REJECT_SCORE=60
+APPROVAL_REQUIRE_REPUTATION=true
+APPROVAL_MIN_REPUTATION_ENGINES=20
+```
+
+Required evidence always includes validation, hashing, static inspection, YARA, sandbox, observed processes, network capture metadata, verdict, and report. Completed flags alone do not qualify. Empty network events can represent a real capture with no traffic; absent telemetry cannot. Optional providers can be unconfigured; actual execution failures still require review. Disabling the reputation requirement is an explicit policy choice, not a workaround for missing sandbox evidence.
+
+Malware policy 1.1 scores VT malicious/suspicious counts, Hybrid malicious/suspicious verdicts, YARA matches, observed high-severity behavior, and Cuckoo 3 task scores (9–10 adds 70; 6–8 adds 30; positive scores below 6 add 10). Scores ≥60 are likely malicious; ≥20 suspicious. A lower score requires configured coverage/reputation for a likely-benign finding. AI indicators contribute no malware points.
+
+**No malicious behavior detected is not proof of safety or absence of vulnerabilities.** There is no CVE, dependency, or vulnerability scanner in this implementation. Reports explicitly mark vulnerability assessment as `NOT_PERFORMED`. Certificate presence also does not establish signature trust. Execution time, guest configuration, encrypted traffic, background activity, and unavailable raw telemetry limit conclusions.
+
+## Providers and sharing
+
+Set backend-only `VIRUSTOTAL_API_KEY` and `HYBRID_ANALYSIS_API_KEY` if needed. Settings performs real connectivity checks; configured credentials alone are not called healthy. Hash lookup may return no existing report. Sending file contents to either external provider requires both `EXTERNAL_UPLOADS_ENABLED=true` and per-job consent. Provider API credentials remain required even though application login is removed.
+
+For Cuckoo use `SANDBOX_KIND=cuckoo3`, `CUCKOO_API_URL`, and `CUCKOO_API_TOKEN`. Legacy `cuckoo` and CAPE `cape` routes remain supported separately. Cuckoo 3 API/normalization is checked against the pinned source and [upstream Web API](https://cuckoo-hatch.cert.ee/static/docs/using/web-api-endpoints/). See [sandbox/README.md](sandbox/README.md) for host/guest setup and live verification.
+
+YARA files under `yara/rules/` and AI signatures under `ai-signatures/providers.json` load for each analysis. Static SDK strings are indicators, not runtime evidence. DNS alone does not prove an API call. The supplied heuristic rules are not comprehensive malware coverage.
+
+## Docker alternative
+
+This starts the **application services only**. Prepare Cuckoo on a host with an isolated Windows guest using the infrastructure steps above or an existing sandbox deployment. `./start` manages local processes, not Compose containers.
+
+### 1. Check Docker and prepare configuration
 
 ```bash
-cp .env.example .env
+docker version
+docker compose version
+```
+
+These instructions require Docker Engine and Compose v2. If your Docker installation requires sudo, use `sudo docker compose ...` for the Compose commands below. Stop any local installation with `./stop.sh` before switching modes, and keep a private backup of its `.env`.
+
+For a fresh Docker configuration, copy the example **only if `.env` does not already exist**:
+
+```bash
+test -e .env || cp .env.example .env
 chmod 600 .env
 nano .env
 ```
 
-Generate a separate random value for each password/secret by running this command five times:
-
-```bash
-openssl rand -hex 32
-```
-
-Use those values for `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `MINIO_SECRET_KEY`, `AUTH_SECRET`, and `ADMIN_PASSWORD`. `AUTH_SECRET` needs at least 32 characters; `ADMIN_PASSWORD` needs at least 12. Hex values avoid URL-encoding issues.
-
-Match each service password exactly in its URL:
+Generate three separate values by running `openssl rand -hex 32` three times. Use them for the database, Redis and MinIO passwords. Replace every `CHANGE_ME` value and use the same database/Redis password in the corresponding URL:
 
 ```dotenv
-POSTGRES_PASSWORD=YOUR_DATABASE_PASSWORD
-DATABASE_URL=postgresql+psycopg://sentinel:YOUR_DATABASE_PASSWORD@postgres:5432/sentinel
-REDIS_PASSWORD=YOUR_REDIS_PASSWORD
-REDIS_URL=redis://:YOUR_REDIS_PASSWORD@redis:6379/0
+POSTGRES_PASSWORD=CHANGE_ME_DATABASE_PASSWORD
+DATABASE_URL=postgresql+psycopg://sentinel:CHANGE_ME_DATABASE_PASSWORD@postgres:5432/sentinel
+REDIS_PASSWORD=CHANGE_ME_REDIS_PASSWORD
+REDIS_URL=redis://:CHANGE_ME_REDIS_PASSWORD@redis:6379/0
 MINIO_ENDPOINT=http://minio:9000
 MINIO_ACCESS_KEY=sentinel-storage
-MINIO_SECRET_KEY=YOUR_SEPARATE_STORAGE_SECRET
+MINIO_SECRET_KEY=CHANGE_ME_MINIO_SECRET
 STORAGE_BACKEND=minio
 STORAGE_BUCKET=sentinel
-AUTH_SECRET=YOUR_SEPARATE_AUTH_SECRET
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=YOUR_SEPARATE_ADMIN_PASSWORD
-SECURE_COOKIES=false
 YARA_PATH=/yara/rules
 AI_SIGNATURES_PATH=/ai-signatures/providers.json
+FRONTEND_HOST=0.0.0.0
+CUCKOO_AUTO_START=false
 EXTERNAL_UPLOADS_ENABLED=false
 MOCK_ANALYSIS=false
 ```
 
-The example words above are placeholders, not usable passwords. Keep `SECURE_COOKIES=false` only for localhost HTTP demonstration; production HTTPS requires `true`.
+These are placeholders, not usable credentials. There are no application login settings. If converting an existing local `.env`, replace its localhost database/Redis URLs and filesystem storage settings with these Docker values while retaining provider keys. Do not run `setup-local.sh` in Docker mode: it rewrites the URLs for local processes.
 
-**If switching from local mode**, stop with `./stop.sh`, save a private backup of `.env`, and replace the local URLs/storage/rule paths with the Docker settings above. Remove the local-only `ALLOWED_ORIGINS` setting so the backend uses its default same-origin behavior. The containers reach the database via `postgres`, Redis via `redis`, and MinIO via `minio`; `127.0.0.1` inside a container is not the host machine.
+Set `SANDBOX_KIND`, `CUCKOO_API_URL` and `CUCKOO_API_TOKEN` for the sandbox that the containers can actually reach. Container `127.0.0.1` refers to the container itself, so the local default `http://127.0.0.1:8090` will not reach the host's Cuckoo API. Use a separately configured, restricted management endpoint and confirm isolation before setting `SANDBOX_ISOLATION_CONFIRMED=true`. A remote API is not started by this Compose file.
 
-Keep provider keys in `.env`, never in frontend code. Do not run `setup-local.sh` for Docker startup: it rewrites `.env` for local processes.
-
-### Step 3 — build and start
+### 2. Build and start
 
 ```bash
-sudo docker compose config --quiet
-sudo docker compose up -d --build
-sudo docker compose ps -a
-```
-
-The first build can take several minutes. Compose builds MinIO from source using `deploy/minio/Dockerfile`; it does not depend on pulling the unavailable `minio/minio` image.
-
-`migrate` and `storage-init` are one-time initialization services. **Exited (0) is normal** for them. An exit code other than zero requires investigation before the API starts.
-
-### Step 4 — open and verify
-
-Open **http://localhost:8080**. Sign in using `ADMIN_USERNAME` and `ADMIN_PASSWORD` from `.env`.
-
-```bash
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps -a
 curl --fail http://127.0.0.1:8080/health
-sudo docker compose logs --no-color --tail=80 migrate storage-init api worker
 ```
 
-Only the proxy's loopback port 8080 is published. Docker does not use the local frontend's port 3100.
+Open **`http://HOST_LAN_IP:8080`** without login. Only Nginx is published; it proxies API, uploads, SSE and frontend traffic. `FRONTEND_PORT` affects local mode, not this fixed Compose port. MinIO is built from the included Dockerfile, so the first build may take longer.
 
-### Step 5 — stop, restart, or update
-
-Stop while retaining database/storage volumes:
+`migrate` and `storage-init` are one-time services: **Exited (0) is expected**. If either exits unsuccessfully, inspect:
 
 ```bash
-sudo docker compose down
+docker compose logs --no-color --tail=80 migrate storage-init api worker
 ```
 
-After changing provider keys or other backend configuration:
+### 3. Stop, update, or switch back
 
 ```bash
-sudo docker compose up -d --force-recreate api worker scheduler
+# Stop while preserving stored data.
+docker compose down
+
+# Apply code updates.
+docker compose up -d --build
+
+# Apply only backend/provider .env changes to an already running stack.
+docker compose up -d --force-recreate api worker scheduler
 ```
 
-After pulling code updates, with the previous stack stopped:
+Do not add `-v` to `down` unless intentionally deleting volumes. Changing `.env` does not change passwords inside an already initialized PostgreSQL volume. Local and Docker histories remain separate; changing modes does not migrate them.
+
+To return to local-process mode:
 
 ```bash
-sudo docker compose up -d --build
-sudo docker compose ps -a
-```
-
-Do **not** add `--volumes` or `-v` to `docker compose down` unless you intentionally want to delete stored database, Redis, and sample/report data. Existing PostgreSQL volumes retain their original password; changing `.env` does not change that database password.
-
-### Switching back to non-Docker
-
-```bash
-sudo docker compose down
+docker compose down
 bash setup-local.sh
-./start.sh
+./start
 ```
 
-Setup changes `.env` back to local addresses and filesystem storage. Local and Docker analysis histories remain separate; switching modes does not migrate them.
+If using the managed local Cuckoo instance again, restore its loopback API URL and `CUCKOO_AUTO_START=true` in `.env` before startup. Local setup preserves sandbox settings; it does not convert a remote Docker sandbox connection automatically.
 
-## 4. First analysis — step by step
-
-1. Start your chosen mode and sign in.
-2. Open **Settings** to inspect actual provider connectivity. A configured key alone does not prove connectivity.
-3. Open **Upload** and select a harmless Windows `.exe` you own. Do not run unknown samples on the application host.
-4. Decide whether to permit external submission. Hash lookups can work without uploading file contents. Uploading bytes requires both `EXTERNAL_UPLOADS_ENABLED=true` in `.env` and explicit consent for that analysis.
-5. Start analysis and follow the live engine states. Progress reflects completed/terminal engine states, not fabricated timing.
-6. Open the report, expand evidence, and inspect available provider responses. Hybrid Analysis retains received raw responses; account restrictions can prevent access to the full report endpoint even when a summary is available.
-7. Use **Samples** to find previous files and analysis history.
-
-Static analysis and YARA can work without provider keys or a sandbox. Behavior/network evidence needs sandbox telemetry. Missing coverage may produce `INCONCLUSIVE`; this is an honest result, not a failed application startup. Changing configuration does not rewrite old results: submit a new analysis to test the change.
-
-## 5. Troubleshooting
-
-| Symptom | Check / action |
-|---|---|
-| Browser cannot reach localhost | Use port **3100** for local or **8080** for Docker. Check process status / `docker compose ps -a`, then startup logs. |
-| `python3.13: command not found` | Install Python 3.13 and its venv package, or pre-create `.venv-local` using Python 3.12 as described above. |
-| PostgreSQL binaries missing | Install the PostgreSQL server package, not only the client. The local launcher searches `/usr/lib/postgresql/*/bin`. |
-| PostgreSQL password authentication failed after an edit | Restore the password matching the initialized database, or perform an intentional database password change. Do not delete data to reset a configuration error. |
-| Port already in use | Inspect with `ss -ltnp`. Stop only the process you recognize; do not kill unrelated applications. |
-| Login repeatedly returns to login screen | Confirm your password and `SECURE_COOKIES=false` for localhost HTTP, then restart the backend. |
-| API credentials not configured | Edit the root `.env`, then restart local processes or recreate Docker backend containers. |
-| Invalid API key / access denied | Verify the key and account permissions; connectivity and permission to submit/download reports are distinct. |
-| Rate limited | Wait for the account quota to recover, reduce submissions, and start a new analysis later. |
-| Hash not found; external upload not permitted | No report exists for that hash. Enable the global upload policy and consent only if sharing that file is permitted. |
-| Hybrid Analysis HTTP 404 | Missing-hash responses are handled as no report; other 404s can indicate a report/route problem. Inspect the engine's diagnostic and raw response availability. |
-| Sandbox unavailable; behavior/network unavailable | Connect an operational sandbox with a prepared Windows VM. Installing the application or an API package alone is insufficient. |
-| `storage-init` failed | Run `sudo docker compose logs --tail=100 storage-init minio`. Bundled MinIO needs `STORAGE_BACKEND=minio`, not `s3` or `filesystem`. |
-| MinIO `PutPublicAccessBlock` / `MalformedXML` error | Confirm `STORAGE_BACKEND=minio`, update the code, and rebuild/recreate with `sudo docker compose up -d --build`. AWS S3 public-access-block handling differs from MinIO. |
-| Job remains queued | Check the worker and scheduler logs and Redis/database health; each is required in both modes. |
-
-Do not paste `.env`, complete environment dumps, or unredacted `docker compose config` output into support messages. Use `docker compose config --quiet` for validation without printing interpolated secrets.
-
-## What is implemented
-
-- Authenticated upload, bounded PE header validation, SHA-256/SHA-1/MD5, duplicate detection, sample history and per-job external submission consent.
-- Persistent engine states, durable database dispatch, Celery workers, per-job Redis leases, timeouts, failure isolation, and resumable completed stages.
-- VirusTotal hash lookup, consent-gated upload and polling; Hybrid Analysis hash search, consent-gated submission, polling and summary retrieval; isolated CAPE/Cuckoo task submission, checkpointing, polling and JSON reports.
-- PE inspection, imports/exports/resources/version data, section entropy, bounded ASCII/UTF-16 strings, certificate metadata, real YARA rules.
-- Sandbox behavior/network normalization, source-preserving raw evidence, configurable deterministic AI indicators, transparent scoring, JSON reports in object storage.
-- Overview, upload, live analysis, full report, sample library/history, server-managed settings, rule inspection and administration pages. No unavailable check becomes a clean result.
-
-This is a single-administrator SOC deployment. External services and a Windows sandbox require your infrastructure and credentials. This repository does not install or certify a safe malware detonation environment automatically. Read [security boundaries](docs/SECURITY.md) and [sandbox setup](sandbox/README.md) before enabling dynamic execution.
-
-## Provider configuration
-
-**VirusTotal:** set `VIRUSTOTAL_API_KEY`. Hash lookup uses `/api/v3/files/{sha256}`. When absent, file upload only occurs if both `EXTERNAL_UPLOADS_ENABLED=true` and the upload consent checkbox were selected. Uploads over 32 MB use the provider upload URL endpoint. The adapter polls analyses and then fetches the actual file report. Rate limits and authorization errors remain visible engine failures. Respect your account's upload/sharing policy and licensed usage. [Official upload API](https://docs.virustotal.com/reference/files-scan).
-
-**Hybrid Analysis:** set `HYBRID_ANALYSIS_API_KEY` and a valid account-supported `HYBRID_ENVIRONMENT_ID` (default 160; verify against your deployment/account). The adapter searches `/search/hash`, retrieves summaries, and optionally submits/polls under the same two-part consent policy. [Official API documentation](https://www.hybrid-analysis.com/docs/api/v2).
-
-**CAPE/Cuckoo:** configure the dedicated infrastructure using [sandbox/README.md](sandbox/README.md). Set `CUCKOO_API_URL`, `CUCKOO_API_TOKEN`, `SANDBOX_KIND=cape`, `cuckoo` (legacy), or `cuckoo3`, and only then `SANDBOX_ISOLATION_CONFIRMED=true`. CAPE API layouts can vary by release; test against your installation's `/apiv2/` schema before enabling sample submission. [Official CAPE REST API](https://capev2.readthedocs.io/en/latest/usage/api.html), [guest preparation](https://capev2.readthedocs.io/en/latest/installation/guest/index.html).
-
-For production, use a separate virtualization host for the Windows analysis guest. Network allowlisting, guest credential isolation, task timeout cleanup and verified snapshot restoration are mandatory infrastructure responsibilities.
-
-## Rules and AI detection
-
-Mount `.yar`/`.yara` rules beneath `yara/rules/`. Rules compile on each job, so updates need no application rebuild. Invalid rules fail the YARA stage explicitly. One clearly labeled heuristic rule ships; this is not a comprehensive malware rule feed. Review/licence community rules before deployment. `/rules` displays actual installed files.
-
-`ai-signatures/providers.json` is the versioned provider database (11 provider/runtime groups). Update domain, SDK and endpoint arrays through code review; the worker loads the file for every analysis. Static strings and model filenames remain indicators, DNS or provider communication is SUSPECTED, and a known provider plus observed API path is DETECTED. No LLM is used. TLS encryption, unexercised code, local inference and incomplete monitoring limit confidence. Local runtime strings are not treated as executed inference.
-
-Network and behavior views derive from actual sandbox JSON, not independent packet capture on the application host. Detailed API calls, process trees, file/registry summaries, signatures, dropped-file and screenshot metadata remain available in expandable evidence. Not all provider summaries expose all fields; absent data is not invented. Certificate presence is not signature trust verification.
-
-## Verdict policy
-
-Policy v1.0 adds 70 for at least five VT malicious detections (30 for one to four), 10 for VT suspicious detections, 60 for Hybrid malicious (25 for suspicious), 25 for YARA matches, and 30 for observed high-severity injection behavior. Score ≥60 is LIKELY_MALICIOUS, ≥20 is SUSPICIOUS. LIKELY_BENIGN additionally requires all designated static/reputation/dynamic coverage and supporting reputation. Otherwise INCONCLUSIVE. Every contribution names its source. AI evidence contributes zero points. Tune and validate this deliberately conservative baseline for your environment.
-
-### What you must prepare for dynamic analysis
-
-Neither startup method installs a functioning Windows sandbox. Prepare KVM/QEMU, an isolated analysis network, an appropriately licensed Windows guest, the sandbox guest agent/monitor, a clean disposable snapshot, processing services, and the authenticated sandbox API. Follow [sandbox infrastructure guidance](sandbox/README.md) before enabling it.
-
-Use `SANDBOX_KIND=cape` for a CAPE `/apiv2` API URL, `cuckoo` for legacy Cuckoo API routes, or `cuckoo3` for the Cuckoo 3 API root. These API layouts are not interchangeable. The presence of a Cuckoo 3 adapter does not establish that a working Windows execution environment has been installed or tested.
-
-Set `CUCKOO_API_URL` and `CUCKOO_API_TOKEN` on the backend. Set `SANDBOX_ISOLATION_CONFIRMED=true` only after verifying isolation and snapshot restoration. For Docker, a sandbox API bound only to the host's loopback is not reachable via container `localhost`; use an explicitly reachable, firewall-restricted management address.
-
-A successful health request alone is insufficient. Submit a harmless EXE, verify the VM executes it, retrieve a completed report, and verify snapshot restoration before accepting unknown samples. Until that is done, demonstrate the available static/reputation features and show sandbox unavailability honestly.
-
-## Development checks
-
-With the local dependencies installed:
+## Verification
 
 ```bash
 PYTHONPATH=backend .venv-local/bin/python -m pytest backend/tests -q
 npm run typecheck --prefix frontend
+npm run build --prefix frontend
+.venv-local/bin/python scripts/cuckoo_local.py doctor
+.venv-local/bin/python scripts/verify_sandbox.py
 ```
 
-Stop the local frontend before building because development and build share `.next/`:
+Local development uses `.next-dev`; production builds use `.next`. Source-contract tests use explicit fixtures and do not establish live VM execution. The live verification script compiles the harmless `sandbox/smoke.c` (requires MinGW), submits it, waits for actual processing, checks hashes/evidence/report state, and saves `.local/verification/status.json`. It exits 0 only if dynamic execution also succeeds. `--allow-unavailable` exercises the degraded workflow but exits 2 when Cuckoo execution was not verified.
+
+Browser checks additionally require Playwright and a Chromium executable. These are optional development tools, not installed by `setup-local.sh`:
 
 ```bash
-./stop.sh
-npm run build --prefix frontend
-./start.sh
+.venv-local/bin/python -m pip install playwright
 ```
 
-These tests/builds do not establish live provider or VM connectivity. Verify those separately with a safe file through the real UI. Optional browser smoke checks in `frontend/tests/browser_smoke.py` use explicitly intercepted empty API responses; they are UI checks, not proof of working analysis providers.
+Install Chromium for your distribution or set `CHROMIUM_PATH` to an installed Chromium executable. On Debian/Kali, the package is normally `chromium`. After the live verification command has produced `.local/verification/sentinelscan-smoke.exe`, run:
 
-## Configuration reference
+```bash
+VERIFY_BASE_URL=http://HOST_LAN_IP:3100 VERIFY_UPLOAD=1 \
+  .venv-local/bin/python scripts/browser_local_check.py
+```
 
-| Variable | Purpose |
+This optional degraded-mode check performs a real upload, waits for processing, records **Review required**, and downloads a report. It expects sandbox coverage to be missing. Testing the host's LAN URL locally validates binding/proxy behavior, not connectivity from a second physical machine.
+
+## Troubleshooting
+
+| Symptom | Check or next action |
 |---|---|
-| `DATABASE_URL`, `POSTGRES_PASSWORD` | PostgreSQL connection and initial server password; must match. |
-| `REDIS_URL`, `REDIS_PASSWORD` | Redis connection and server password; must match. |
-| `AUTH_SECRET` | Session signing secret, at least 32 random characters. |
-| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | Application login; password at least 12 characters. |
-| `SECURE_COOKIES` | `false` for localhost HTTP; `true` behind production HTTPS. |
-| `VIRUSTOTAL_API_KEY`, `HYBRID_ANALYSIS_API_KEY` | Backend-only provider credentials. |
-| `EXTERNAL_UPLOADS_ENABLED` | Global permission for file submission; per-analysis consent is also required. |
-| `HYBRID_ENVIRONMENT_ID` | Account-supported Hybrid Analysis environment. |
-| `PROVIDER_TIMEOUT` | Provider analysis timeout in seconds; default 900. |
-| `CUCKOO_API_URL`, `CUCKOO_API_TOKEN`, `SANDBOX_KIND` | Sandbox management API connection and adapter choice. |
-| `SANDBOX_ISOLATION_CONFIRMED` | Operator confirmation of verified isolation; not an automatic safety check. |
-| `STORAGE_BACKEND` | `filesystem` locally, `minio` for bundled Compose, or `s3` for configured AWS storage. |
-| `LOCAL_STORAGE_PATH` | Absolute private sample/report path for filesystem mode. |
-| `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `STORAGE_BUCKET` | S3-compatible storage configuration. |
-| `YARA_PATH`, `AI_SIGNATURES_PATH` | Rule and provider-signature locations; paths differ between local and containers. |
-| `MAX_UPLOAD_MB` | Upload size limit; default 32 MB. |
-| `MOCK_ANALYSIS` | Keep `false`; do not demonstrate fabricated analysis results. |
+| `./start` says the Python environment is missing | Run `bash setup-local.sh` from the repository root as your normal user. |
+| Python dependencies fail during Cuckoo installation | Keep Cuckoo on Python 3.10 and use its separate lockfile/environment. Inspect the setup error before changing pins. |
+| PostgreSQL binaries are missing | Install the PostgreSQL **server** package; the launcher searches `/usr/lib/postgresql/*/bin`. |
+| PostgreSQL password mismatch | Restore the password matching the existing data directory or perform an intentional database password change. Do not delete the database. |
+| Port already in use | Inspect `ss -ltnp` and stop only the service you recognize, or consistently reconfigure local service ports. |
+| Host can open the app, another machine cannot | Check the active LAN IP, `FRONTEND_HOST`, port 3100 (local) or 8080 (Docker), host firewall and Wi-Fi peer isolation. |
+| Page loads but API/upload fails | Request `/health` and `/api/settings` through the frontend port. Check `.local/logs/frontend.log` and `api.log`; no browser URL should target localhost on the client machine. |
+| Cuckoo reports `CORE_NOT_READY` or no matching machine | Run `scripts/cuckoo_local.py doctor` with `.venv-local/bin/python`; inspect the listed prerequisites and Cuckoo core log. An API-only process cannot execute files. |
+| Missing bridge, capture permissions or KVM access | Complete step 4. After reboot, check the installed host setup service or rerun the host setup command. |
+| Guest build failed / image already exists | Preserve the partial artifacts and inspect the VMCloak error. Do not repeatedly rerun init or remove the whole `.local` directory. |
+| Analysis stays queued | Confirm worker and scheduler are running with `scripts/local.py status`; inspect worker/scheduler logs and `/api/providers/health`. |
+| Report says `COMPLETED_WITH_GAPS` / `REVIEW_REQUIRED` | Read engine reasons and acceptance criteria. Unavailable execution or missing reputation is not a successful clean analysis. |
+| Configuration edits appear ignored | Run `./stop.sh` then `./start`, or recreate the affected Docker containers. |
 
-`.env` and `.local/` are ignored by Git. Keep private configuration backups outside version control. Rotate any credentials you have shared publicly.
-
-## Production operations
-
-- Back up PostgreSQL and private object storage together; reports refer to sample hashes and analysis UUIDs. Redis persistence is enabled; queued work is recoverable from PostgreSQL.
-- Run exactly one scheduler. Monitor `/health`, authenticated `/health/providers`, worker logs, failed jobs, disk space, provider rate limits and sandbox restoration. Worker stage logs include analysis IDs and statuses without secret values.
-- Configure a centralized log collector/error alerting service in your environment. Provider configuration is distinct from connectivity; do not label a configured provider healthy without a real request.
-- Add retention and deletion policies appropriate to your organization. This release does not automatically delete evidence or implement an analyst-review workflow despite retaining a migration table for future reviews.
-- Pin and scan container images, patch dependencies, rotate keys, limit outbound worker destinations, use encryption at rest, replace MinIO bootstrap credentials with least-privilege identities and independently review the system before production exposure.
-- Local sandbox teardown/restore is performed by CAPE's machinery, not by a web application endpoint. Quarantine guests on restore failure.
-
-[API reference](docs/API.md) · [Security model](docs/SECURITY.md) · [Worker semantics](workers/README.md)
-
+[API reference](docs/API.md) · [Security boundary](docs/SECURITY.md) · [Worker semantics](workers/README.md)

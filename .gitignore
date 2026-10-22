@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 frontend/node_modules/
 frontend/.next/
+frontend/.next-dev/
 frontend/*.tsbuildinfo
 .DS_Store
 

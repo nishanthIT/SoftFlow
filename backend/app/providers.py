@@ -3,6 +3,8 @@ import time
 import json
 import gzip
 import io
+import hashlib
+import re
 from .provider_status import diagnostic
 from abc import ABC, abstractmethod
 import httpx
@@ -11,6 +13,13 @@ from .config import settings as cfg
 class Unavailable(Exception): pass
 class ProviderTimeout(Exception): pass
 class ProviderFailure(Exception): pass
+
+def windows_available(payload):
+    """Cuckoo 3 returns {platform: [versions]}, not a machine count."""
+    if not isinstance(payload, dict):
+        raise ValueError('Invalid Cuckoo platforms response')
+    versions = payload.get(cfg.sandbox_platform, [])
+    return isinstance(versions, list) and cfg.sandbox_os_version in versions
 
 def poll(fetch, done):
     deadline = time.monotonic() + cfg.provider_timeout
@@ -163,41 +172,113 @@ class Cuckoo3Provider(SandboxProvider):
     """Cuckoo 3 web API; routes verified against cert-ee/cuckoo3 source."""
     def __init__(self):
         if not cfg.cuckoo_api_url:raise Unavailable('Cuckoo Sandbox API URL is not configured')
+        if not cfg.cuckoo_api_token:raise Unavailable('Cuckoo 3 API token is not configured')
         self.client=httpx.Client(base_url=cfg.cuckoo_api_url.rstrip('/')+'/',headers={'Authorization':'Token '+cfg.cuckoo_api_token},timeout=cfg.request_timeout)
+        self.checkpoint = lambda d: None
+        self.saved = {}
+        self.filename = 'sample.exe'
+        self.deadline = time.monotonic() + cfg.provider_timeout
+
+    def save(self, **data):
+        self.saved.update(data)
+        self.checkpoint(dict(self.saved))
+
+    def read(self, path):
+        """Retry safe reads only. Never retry a file POST with unknown outcome."""
+        while time.monotonic() < self.deadline:
+            remaining = self.deadline - time.monotonic()
+            try:
+                response = self.client.get(path, timeout=min(cfg.request_timeout, remaining))
+                if response.status_code not in (404, 429, 500, 502, 503, 504):
+                    return checked(response)
+                self.save(last_http_status=response.status_code)
+                delay = response.headers.get('retry-after', '')
+                delay = min(int(delay), 60) if delay.isdigit() else cfg.provider_poll_interval
+            except (httpx.TimeoutException, httpx.NetworkError):
+                self.save(last_transport_error='Cuckoo API temporarily unreachable')
+                delay = cfg.provider_poll_interval
+            time.sleep(min(delay, max(0, self.deadline-time.monotonic())))
+        raise ProviderTimeout('Cuckoo report deadline exceeded; task may still be running upstream')
+
     def submit(self,data):
         if not cfg.sandbox_isolation_confirmed:raise Unavailable('Cuckoo VM isolation and snapshot restoration have not been verified')
-        platforms=checked(self.client.get('submit/platforms'))
-        if not platforms:raise Unavailable('Cuckoo service has no available Windows analysis VM')
-        r=self.client.post('submit/file',files={'file':('sample.exe',data)},data={'settings':json.dumps({'timeout':120,'platforms':[{'platform':'windows','os_version':'10'}]})})
-        if r.status_code==503:raise Unavailable('Cuckoo submission could not notify its scheduler; Cuckoo core is not running')
-        return checked(r)['analysis_id']
+        platforms=self.read('submit/platforms')
+        if not windows_available(platforms):raise Unavailable('Cuckoo has no matching Windows '+cfg.sandbox_os_version+' analysis VM')
+        self.save(phase='submission_pending')
+        r=self.client.post('submit/file',files={'file':(self.filename,data,'application/octet-stream')},data={'settings':json.dumps({
+            'timeout':cfg.sandbox_analysis_timeout,'enforce_timeout':True,
+            'platforms':[{'platform':cfg.sandbox_platform,'os_version':cfg.sandbox_os_version}]})})
+        # A 503 can contain a *persisted* analysis. Keep its id before reporting
+        # scheduler failure; blindly retrying this POST creates duplicate jobs.
+        if r.status_code == 503:
+            payload = r.json()
+            if payload.get('analysis_id'):
+                self.save(task_id=self.valid_id(payload['analysis_id']),phase='scheduler_unavailable',raw_submission=payload)
+            raise Unavailable('Cuckoo stored the submission but could not notify its scheduler; inspect the saved analysis ID before retrying')
+        payload=checked(r)
+        task=self.valid_id(payload['analysis_id'])
+        self.save(task_id=task,phase='submitted',raw_submission=payload)
+        return task
+
+    @staticmethod
+    def valid_id(value):
+        if not isinstance(value,str) or not re.fullmatch(r'\d{8}-[A-Z0-9]{6}(?:_\d+)?',value):
+            raise ValueError('Invalid Cuckoo analysis/task identifier')
+        return value
+
     def get_status(self,task_id):
-        return checked(self.client.get(f'analysis/{task_id}'))
+        r=self.read(f'analysis/{self.valid_id(task_id)}')
+        if not isinstance(r,dict) or r.get('id') != task_id or not isinstance(r.get('state'),str):
+            raise ValueError('Invalid Cuckoo analysis response')
+        return r
     def get_report(self,task_id):
         analysis=self.get_status(task_id)
+        if analysis['state']!='finished':raise ProviderFailure('Cuckoo analysis is no longer finished during report retrieval')
         result={'analysis':analysis,'tasks':[]}
+        self.save(report=result,phase='retrieving_reports')
         for task in analysis.get('tasks',[]):
-            tid=task['id']
-            result['tasks'].append({'task':checked(self.client.get(f'analysis/{task_id}/task/{tid}')),
-                'post':checked(self.client.get(f'analysis/{task_id}/task/{tid}/post'))})
+            tid=self.valid_id(task['id'])
+            if not tid.startswith(task_id+'_'):raise ValueError('Cuckoo task belongs to another analysis')
+            detail=self.read(f'analysis/{task_id}/task/{tid}')
+            item={'task':detail};result['tasks'].append(item);self.save(report=result)
+            if detail.get('id') != tid or detail.get('analysis_id') != task_id:
+                raise ValueError('Cuckoo task identity mismatch')
+            if detail.get('state')!='reported' or detail.get('errors',{}).get('fatal'):
+                raise ProviderFailure('Cuckoo execution task failed or is incomplete; see preserved task errors')
+            item['post']=self.read(f'analysis/{task_id}/task/{tid}/post')
+            if item['post'].get('task_id') != tid:raise ValueError('Cuckoo post report identity mismatch')
+            self.save(report=result)
         if not result['tasks']:raise ProviderFailure('Cuckoo analysis finished without any task reports')
         return result
-    def run(self,data,checkpoint,previous=None):
+    def run(self,data,checkpoint,previous=None,filename='sample.exe'):
         try:
-            task=previous or self.submit(data)
-            checkpoint({'task_id':task,'provider':'cuckoo3','phase':'submitted'})
-            def done(r):
+            self.checkpoint=checkpoint
+            self.filename=filename
+            self.saved=dict(previous) if isinstance(previous,dict) else {'task_id':previous} if previous else {}
+            if self.saved.get('phase')=='submission_pending' and not self.saved.get('task_id'):
+                raise ProviderFailure('Previous submission outcome is unknown; check Cuckoo before creating another task')
+            expires=self.saved.get('deadline_at',time.time()+cfg.provider_timeout)
+            self.deadline=time.monotonic()+max(0,expires-time.time())
+            self.save(provider='cuckoo3',deadline_at=expires)
+            if time.monotonic()>=self.deadline:raise ProviderTimeout('Saved Cuckoo deadline expired')
+            task=self.saved.get('task_id') or self.submit(data)
+            while time.monotonic()<self.deadline:
+                r=self.get_status(task)
                 status=r.get('state','unknown')
-                checkpoint({'task_id':task,'provider':'cuckoo3','phase':status,'raw_analysis':r})
-                if status in ['fatal_error','failed','error']:raise ProviderFailure('Cuckoo dynamic analysis failed; inspect the preserved analysis details')
-                return status=='finished'
-            poll(lambda:self.get_status(task),done)
+                self.save(task_id=task,phase=status,raw_analysis=r,
+                          execution_tasks=[{'id':t.get('id'),'state':t.get('state')} for t in r.get('tasks',[])])
+                if status in ['fatal_error','failed','error','no_selected','waiting_manual']:
+                    raise ProviderFailure('Cuckoo cannot complete dynamic analysis ('+status+'); inspect preserved analysis errors')
+                if status=='finished':break
+                time.sleep(min(cfg.provider_poll_interval,max(0,self.deadline-time.monotonic())))
+            else:raise ProviderTimeout('Cuckoo analysis deadline exceeded')
             report=self.get_report(task)
-            failed=[t for t in report['tasks'] if t['task'].get('state')!='reported']
-            if failed:
-                checkpoint({'task_id':task,'provider':'cuckoo3','phase':'failed','report':report})
-                raise ProviderFailure('Cuckoo finished with failed or incomplete execution tasks')
-            return {'task_id':task,'source':'cuckoo3','report':report,'snapshot_restoration':'Enforced by the configured Cuckoo machinery; not independently attested by the API'}
+            if report['analysis'].get('submitted',{}).get('sha256','').lower()!=hashlib.sha256(data).hexdigest():
+                raise ProviderFailure('Cuckoo report hash does not match the submitted file')
+            if report['analysis'].get('errors',{}).get('fatal'):
+                raise ProviderFailure('Cuckoo analysis contains fatal errors')
+            return {**self.saved,'task_id':task,'phase':'reported','source':'cuckoo3','report':report,
+                'snapshot_restoration':'Managed by Cuckoo machinery; not independently verified by this API'}
         finally:self.client.close()
 
 def sandbox_provider():

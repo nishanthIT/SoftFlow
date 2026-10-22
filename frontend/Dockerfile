@@ -4,6 +4,7 @@ COPY package*.json ./
 RUN npm ci
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV API_INTERNAL_URL=http://api:8000
 RUN npm run build
 FROM node:22-alpine
 WORKDIR /app

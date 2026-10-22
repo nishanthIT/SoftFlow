@@ -9,6 +9,8 @@ from .config import settings
 from .models import Session, Job, Sample, Engine, ENGINES, TERMINAL, now, record_models
 from . import providers, storage, static, policy
 from .provider_status import diagnostic, sanitize
+from .reporting import build_report
+from fastapi.encoders import jsonable_encoder
 
 log=logging.getLogger('sentinel.worker')
 celery=Celery('sentinel',broker=settings.redis_url,backend=settings.redis_url)
@@ -42,7 +44,7 @@ def execute(job_id,name,fn):
         update(job_id,name,'COMPLETED',data)
         return data
     except providers.Unavailable as e: update(job_id,name,'UNAVAILABLE',reason=sanitize(str(e)),data={**snapshot(job_id)[name]['data'],'diagnostic':{'code':'ANALYSIS_UNAVAILABLE','message':sanitize(str(e))}})
-    except providers.ProviderFailure as e: update(job_id,name,'FAILED',reason=sanitize(str(e)))
+    except providers.ProviderFailure as e: update(job_id,name,'FAILED',reason=sanitize(str(e)),data={**snapshot(job_id)[name]['data'],'diagnostic':{'code':'PROVIDER_FAILED','message':sanitize(str(e))}})
     except (providers.ProviderTimeout,SoftTimeLimitExceeded) as e:
         message=f'{name} analysis is still pending or exceeded its configured deadline'
         update(job_id,name,'TIMEOUT',reason=message,data={**snapshot(job_id)[name]['data'],'diagnostic':{'code':'ANALYSIS_TIMEOUT','message':message}})
@@ -68,43 +70,61 @@ def run(job_id):
     try:
         with Session.begin() as db:
             job=db.get(Job,job_id)
-            if not job or job.status=='COMPLETED': return
+            if not job or job.status in ('COMPLETED','FAILED'): return
             job.status='RUNNING'; job.started_at=job.started_at or now()
-            sample=db.get(Sample,job.sample_id); sha=sample.sha256; consent=job.consent
+            sample=db.get(Sample,job.sample_id); sha=sample.sha256; consent=job.consent; filename=job.submitted_filename or sample.filename
             hashes={'sha256':sha,'sha1':sample.sha1,'md5':sample.md5}
         data=storage.get('samples/'+sha)
+        import hashlib
+        actual={name:hashlib.new(name,data).hexdigest() for name in hashes}
+        if actual!=hashes:raise ValueError('Stored sample integrity check failed')
         execute(job_id,'validation',lambda:{'format':'PE executable','validated':True})
-        execute(job_id,'hashing',lambda:hashes)
+        execute(job_id,'hashing',lambda:actual)
         st=execute(job_id,'static',lambda:static.analyze(data))
         yr=execute(job_id,'yara',lambda:static.scan_yara(data))
         execute(job_id,'virustotal',lambda:providers.virustotal(data,sha,consent,lambda d:update(job_id,'virustotal','RUNNING',d)))
         execute(job_id,'hybrid-analysis',lambda:providers.hybrid(data,sha,consent,lambda d:update(job_id,'hybrid-analysis','RUNNING',d)))
-        prior=snapshot(job_id)['sandbox']['data'].get('task_id')
-        sb=execute(job_id,'sandbox',lambda:providers.sandbox_provider().run(data,lambda d:update(job_id,'sandbox','RUNNING',d),prior))
+        prior=snapshot(job_id)['sandbox']['data']
+        def sandbox():
+            provider=providers.sandbox_provider()
+            checkpoint=lambda d:update(job_id,'sandbox','RUNNING',d)
+            if settings.sandbox_kind=='cuckoo3':return provider.run(data,checkpoint,prior,filename=filename)
+            return provider.run(data,checkpoint,prior.get('task_id'))
+        sb=execute(job_id,'sandbox',sandbox)
         be=execute(job_id,'behavior',lambda:policy.behavior(sb))
         net=execute(job_id,'network',lambda:policy.network(sb))
         states=snapshot(job_id)
         ai=execute(job_id,'ai',lambda:policy.ai_detect(st,net,states['static']['status']=='COMPLETED',states['network']['status']=='COMPLETED',be))
-        execute(job_id,'correlation',lambda:{'schema_version':1,'sample':hashes,'sources':snapshot(job_id)})
+        execute(job_id,'correlation',lambda:{'schema_version':1,'sample':hashes,'sources':{k:v for k,v in snapshot(job_id).items() if k not in ['correlation','verdict','report']}})
         vd=execute(job_id,'verdict',lambda:policy.verdict(snapshot(job_id)))
-        def report():
-            report={'analysis_id':job_id,'sample':hashes,'verdict':vd,'engines':snapshot(job_id),'generated_at':now().isoformat()}
-            storage.put('reports/'+job_id+'.json',json.dumps(report).encode(),'application/json')
-            return {'object_key':'reports/'+job_id+'.json','format':'json','summary':vd}
-        execute(job_id,'report',report)
         mapping={'static_results':st,'sandbox_results':sb,'network_events':net,'yara_matches':yr,'ai_indicators':ai,'behavior_events':be,'verdicts':vd,'iocs':{'static_urls':st.get('urls',[]),'static_ips':st.get('ips',[]),'runtime_domains':net.get('domains',[]),'runtime_ips':net.get('ips',[])}}
         with Session.begin() as db:
             for table,payload in mapping.items():
                 model=record_models[table]
                 db.query(model).filter_by(analysis_id=job_id).delete()
                 db.add(model(analysis_id=job_id,data=payload))
-            job=db.get(Job,job_id); job.status='COMPLETED'; job.completed_at=now()
+        update(job_id,'report','RUNNING')
+        # Write the final snapshot before committing completion. Storage failure
+        # fails the job instead of claiming that a downloadable report exists.
+        with Session.begin() as db:
+            job=db.get(Job,job_id);job.status='COMPLETED';job.completed_at=now()
+            rows=list(db.scalars(select(Engine).where(Engine.analysis_id==job_id)))
+            report_engine=next(e for e in rows if e.name=='report')
+            report_engine.status='COMPLETED';report_engine.completed_at=job.completed_at;report_engine.reason=None
+            report_engine.data={'object_key':'reports/'+job_id+'.json','format':'json','schema_version':'2.0','summary':vd}
+            serialize=lambda row:{c.name:getattr(row,c.name) for c in row.__table__.columns}
+            sample_data=serialize(db.get(Sample,job.sample_id));sample_data['filename']=filename
+            report=build_report(serialize(job),sample_data,[serialize(e) for e in rows],job.completed_at.isoformat())
+            storage.put('reports/'+job_id+'.json',json.dumps(jsonable_encoder(sanitize(report)),indent=2).encode(),'application/json')
     except Exception as e:
         log.error(json.dumps({'analysis_id':job_id,'error':type(e).__name__}))
         with Session.begin() as db:
             job=db.get(Job,job_id); job.status='FAILED'; job.completed_at=now()
             for row in db.scalars(select(Engine).where(Engine.analysis_id==job_id)):
-                if row.status not in TERMINAL: row.status='FAILED'; row.reason='Worker could not complete job'; row.completed_at=now()
+                if row.status not in TERMINAL:
+                    row.status='FAILED';row.completed_at=now()
+                    row.reason='Report persistence/finalization failed' if row.name=='report' and row.started_at else 'Worker could not complete job'
+                    row.data={**row.data,'diagnostic':{'code':'WORKER_FAILED','message':row.reason,'error_type':type(e).__name__}}
         raise
     finally:
         try: lock.release()
