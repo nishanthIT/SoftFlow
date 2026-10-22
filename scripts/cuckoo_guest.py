@@ -18,6 +18,10 @@ from cuckoo_local import ROOT, VERSIONS, configuration, path, paths, run, isolat
 from dotenv import set_key
 
 
+ISO_CHUNK_BYTES = 64 * 1024 * 1024
+ISO_SPACE_MARGIN_BYTES = 64 * 1024 * 1024
+
+
 def guest_paths(values):
     return (path(values,'VMCLOAK_VENV','.local/vmcloak-venv'),
             path(values,'VMCLOAK_CWD','.local/vmcloak'),
@@ -98,6 +102,18 @@ def checksum(filename):
     return sha1.hexdigest(),sha256.hexdigest()
 
 
+def require_iso_space(directory, required):
+    free = shutil.disk_usage(directory).free
+    if free < required:
+        raise RuntimeError(
+            f'Not enough disk space in {directory}: {free / 1024**3:.2f} GiB free; '
+            f'{required / 1024**3:.2f} GiB needed for the remaining download, '
+            'assembled ISO, and safety margin. Downloaded fragments are preserved. '
+            'Free space on this filesystem and rerun download. '
+            'Windows extraction and VM disks need additional space.'
+        )
+
+
 def download(values):
     _,_,_,iso=guest_paths(values)
     expected=VERSIONS['windows_iso_sha1'];url=VERSIONS['windows_iso_url']
@@ -109,7 +125,20 @@ def download(values):
         response=client.head(url);response.raise_for_status();length=int(response.headers['content-length'])
         if response.headers.get('accept-ranges')!='bytes':raise RuntimeError('ISO server must support byte ranges for resumable download')
     partdir=iso.with_suffix('.parts');partdir.mkdir(exist_ok=True,mode=0o700)
-    chunk=64*1024*1024
+    temporary=iso.with_suffix('.verified-part')
+    # This is only a disposable copy of the fragments, never a verified ISO.
+    # Reclaim a previous failed assembly before measuring available space.
+    temporary.unlink(missing_ok=True)
+    chunk=ISO_CHUNK_BYTES
+    count=(length+chunk-1)//chunk
+    remaining=0
+    for index in range(count):
+        part=partdir/str(index)
+        existing=part.stat().st_size if part.exists() else 0
+        size=min(chunk,length-index*chunk)
+        if existing>size:raise RuntimeError('Oversized ISO download fragment')
+        remaining+=size-existing
+    require_iso_space(iso.parent,remaining+length+ISO_SPACE_MARGIN_BYTES)
     def fetch(index):
         start=index*chunk;end=min(length,start+chunk)-1;part=partdir/str(index)
         existing=part.stat().st_size if part.exists() else 0
@@ -128,11 +157,12 @@ def download(values):
             except httpx.HTTPError:
                 if attempt==3:raise
                 time.sleep(2)
-    count=(length+chunk-1)//chunk
     with ThreadPoolExecutor(max_workers=4) as pool:
         for number,_ in enumerate(pool.map(fetch,range(count)),1):
             print(f'Windows ISO: {number}/{count} fragments ready',flush=True)
-    temporary=iso.with_suffix('.verified-part')
+    # Other processes may have used disk space while the download was running.
+    require_iso_space(iso.parent,length+ISO_SPACE_MARGIN_BYTES)
+    print('Assembling and verifying Windows ISO; downloaded fragments are retained until verification succeeds',flush=True)
     with temporary.open('wb') as output:
         for index in range(count):
             with (partdir/str(index)).open('rb') as part:shutil.copyfileobj(part,output)
@@ -182,5 +212,5 @@ if __name__=='__main__':
     args=parser.parse_args()
     try:globals()[args.command.replace('-','_')](configuration())
     except Exception as error:
-        print('Guest setup failed: '+(str(error) if isinstance(error,RuntimeError) else type(error).__name__),file=sys.stderr)
+        print(f'Guest setup failed: {type(error).__name__}: {error}',file=sys.stderr)
         sys.exit(1)

@@ -139,6 +139,8 @@ If the default guest subnet overlaps your LAN/VPN, choose an unused private subn
 
 Use appropriately licensed Windows media. The helper downloads/verifies the pinned media, extracts it, initializes a Windows guest through VMCloak, creates a snapshot, and imports the resulting machine into Cuckoo. Defaults are 2 guest CPUs, 4 GiB RAM, and a 64 GB virtual disk. Allow host capacity for the guest, the application, extracted installation media, base disk, and snapshot files.
 
+Allow at least **9 GiB free on the media filesystem for a fresh ISO download/assembly alone**: the approximately 4.04 GiB download fragments are retained while a second copy is assembled and verified. Extraction, guest disks, and snapshots require additional capacity. `download` does not start a VM or allocate guest RAM. If it fails after `65/65 fragments ready` with `No space left on device`, follow [disk-space recovery](sandbox/README.md#iso-download-fails-with-no-space-left-on-device); keep the downloaded fragments for reuse.
+
 The initial build uses `192.168.30.2`; the snapshot sequence starts at `192.168.30.10`. `CUCKOO_RAM_MB`, `CUCKOO_CPUS`, and `CUCKOO_DISK_GB` can override guest resources. Build failures must be inspected before retrying: existing partial images are not deleted automatically. See [sandbox setup](sandbox/README.md#managed-local-cuckoo-3-workflow) for recovery and alternative infrastructure.
 
 ### 6. Verify isolation and configure execution
@@ -380,6 +382,7 @@ If using the managed local Cuckoo instance again, restore its loopback API URL a
 
 ```bash
 PYTHONPATH=backend .venv-local/bin/python -m pytest backend/tests -q
+.venv-local/bin/python -m pytest scripts/tests -q
 npm run typecheck --prefix frontend
 npm run build --prefix frontend
 .venv-local/bin/python scripts/cuckoo_local.py doctor
@@ -416,6 +419,7 @@ This optional degraded-mode check performs a real upload, waits for processing, 
 | Page loads but API/upload fails | Request `/health` and `/api/settings` through the frontend port. Check `.local/logs/frontend.log` and `api.log`; no browser URL should target localhost on the client machine. |
 | Cuckoo reports `CORE_NOT_READY` or no matching machine | Run `scripts/cuckoo_local.py doctor` with `.venv-local/bin/python`; inspect the listed prerequisites and Cuckoo core log. An API-only process cannot execute files. |
 | Missing bridge, capture permissions or KVM access | Complete step 4. After reboot, check the installed host setup service or rerun the host setup command. |
+| ISO download reaches `65/65`, then `OSError: [Errno 28] No space left on device` | The assembled ISO needs disk space in addition to the fragments. Follow [disk-space recovery](sandbox/README.md#iso-download-fails-with-no-space-left-on-device). Lowering guest RAM does not fix this stage. |
 | Guest build failed / image already exists | Preserve the partial artifacts and inspect the VMCloak error. Do not repeatedly rerun init or remove the whole `.local` directory. |
 | Analysis stays queued | Confirm worker and scheduler are running with `scripts/local.py status`; inspect worker/scheduler logs and `/api/providers/health`. |
 | Report says `COMPLETED_WITH_GAPS` / `REVIEW_REQUIRED` | Read engine reasons and acceptance criteria. Unavailable execution or missing reputation is not a successful clean analysis. |

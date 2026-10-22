@@ -25,9 +25,11 @@ This application's `SANDBOX_KIND=cuckoo` adapter targets the legacy Cuckoo 2 RES
 
 This checkout pins **Cuckoo 3.0.1 / Python 3.10** and a specific VMCloak revision in `versions.json`; application Python is separate. API routes are checked against the installed `cert-ee/cuckoo3` source and [official API documentation](https://cuckoo-hatch.cert.ee/static/docs/using/web-api-endpoints/). `requirements.lock` and `vmcloak-requirements.lock` contain separate dependency sets.
 
+A compatible Windows guest and clean snapshot are required for real Windows behavioral analysis. The application can run static checks without them, but must report unavailable sandbox coverage. This helper is one way to provision the guest; an existing compatible Cuckoo deployment can also be used. The `download` command only prepares installation media and does not start a VM or allocate guest RAM.
+
 On this host, Cuckoo packages, QEMU/KVM and the Windows ISO already exist. No Windows base image or snapshot has been created. The earlier core log failed on missing `br0`. The Android SDK `qemu-img` path has been replaced by the system QEMU path, and the VMCloak helper patch has been repaired. Dynamic execution has **not** been verified.
 
-For a fresh setup (skip installed components):
+For a fresh setup (skip installed components), allow at least **9 GiB free on the ISO destination filesystem for download/assembly alone**. The pinned ISO is about 4.04 GiB; fragments and the assembled copy temporarily occupy about 8.1 GiB together. Extracted installation media, guest disks, and snapshots need additional capacity. See [disk-space recovery](#iso-download-fails-with-no-space-left-on-device) before retrying a failed download.
 
 ```bash
 sudo bash scripts/install-cuckoo-system.sh
@@ -67,3 +69,31 @@ Verify guest-agent reachability on the isolated bridge, the monitor/result-serve
 `./start` manages core (which starts its processing/result services) and the authenticated loopback API when `CUCKOO_AUTO_START=true`. The application itself has no login. `doctor` checks the pinned package environment, system tools, monitor payload, KVM/capture access, configured machine files, interfaces, result-server address, and isolation attestation. A successful doctor is a prerequisite check, not proof of guest execution or snapshot restoration.
 
 Live verification must return success with a real matching task report, observed processes and captured network metadata. An API health response or synthetic unit fixture is not sufficient. Keep `SANDBOX_ISOLATION_CONFIRMED=false` until isolation/restoration have actually been checked. No setup script silently changes that flag.
+
+## ISO download fails with `No space left on device`
+
+`Windows ISO: 65/65 fragments ready` means the pieces have downloaded. The helper still needs to write a second, assembled ISO and verify its checksum. `OSError: [Errno 28] No space left on device` while writing that copy means the destination filesystem has run out of space. It is not a guest RAM allocation failure; changing `CUCKOO_RAM_MB` does not fix it.
+
+Run these checks from the project directory on the machine where setup failed (substitute your configured media directory if `CUCKOO_WINDOWS_ISO` is customized):
+
+```bash
+df -h .local/media
+df -i .local/media
+du -sh .local/media/*
+```
+
+Keep `Win10_1703_English_x64.parts`: its numbered files are the resumable download. Keep an existing verified `.iso` too. The updated downloader discards only `Win10_1703_English_x64.verified-part`, the disposable assembled copy left by an interrupted or failed attempt, before checking space. It checks capacity for the remaining fragments plus assembly before downloading, checks again before assembly, and includes the underlying OS message if an operation fails. Other processes and filesystem quotas can still cause a write to fail after a successful space check.
+
+If you are using the older script, stop any running download first, then remove only that incomplete assembled copy:
+
+```bash
+rm -f -- .local/media/Win10_1703_English_x64.verified-part
+```
+
+Free space on the filesystem shown by `df`. With all fragments already present and the failed assembled copy removed, allow at least **4.1 GiB additional free space** for assembly and the helper's margin. Do not remove the entire `.local` directory: it also contains application data, configuration, and guest artifacts. Retry normally; completed fragments are reused and a matching final ISO is reused without downloading:
+
+```bash
+.venv-local/bin/python scripts/cuckoo_guest.py download
+```
+
+If the current filesystem is too small, choose a mounted filesystem with enough capacity, move the existing `.parts` directory alongside the new ISO location, and set `CUCKOO_WINDOWS_ISO` in `.env` to that ISO's absolute path. Keep its basename unchanged so the fragment directory is found. Moving files within the same filesystem does not increase its available space. Guest extraction uses `CUCKOO_ISO_MOUNT`, and guest images use `VMCLOAK_CWD`; relocating only the ISO does not relocate those larger artifacts.
