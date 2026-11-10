@@ -1,8 +1,8 @@
 'use client';
-import {useEffect,useState} from 'react';
+import {useEffect,useRef,useState} from 'react';
 import {useMutation,useQuery,useQueryClient} from '@tanstack/react-query';
-import {ArrowDownUp,Download,Globe,Loader2,Search} from 'lucide-react';
-import {api,date,human} from '@/lib/api';
+import {ArrowDownUp,Download,FileText,Globe,Loader2,Search,UploadCloud,X} from 'lucide-react';
+import {api,date,human,size} from '@/lib/api';
 import {Badge,Empty,ErrorBox} from './common';
 import {Button} from './ui/button';
 
@@ -12,17 +12,44 @@ const active=(status:string)=>['QUEUED','RUNNING'].includes(status);
 export function SSLChecker(){
  const cache=useQueryClient();const [file,setFile]=useState<File|null>(null),[id,setId]=useState(''),[search,setSearch]=useState(''),[status,setStatus]=useState('');
  const [sort,setSort]=useState<keyof Result>('domain'),[ascending,setAscending]=useState(true);
+ const fileInput=useRef<HTMLInputElement>(null),dragDepth=useRef(0);
+ const [dragging,setDragging]=useState(false),[fileError,setFileError]=useState<Error|null>(null);
  useEffect(()=>{setId(new URLSearchParams(location.search).get('check')||'')},[]);
  function select(identifier:string){setId(identifier);setStatus('');setSearch('');history.replaceState(null,'','/ssl-checker?check='+encodeURIComponent(identifier))}
  const recent=useQuery({queryKey:['ssl-checks'],queryFn:()=>api<Scan[]>('/api/ssl-checks'),refetchInterval:5000});
  const scan=useQuery({queryKey:['ssl-check',id],enabled:!!id,queryFn:()=>api<Scan>('/api/ssl-checks/'+id),refetchInterval:q=>!q.state.data||active(q.state.data.status)?1500:false,refetchIntervalInBackground:true});
  const upload=useMutation({mutationFn:async()=>{if(!file)throw new Error('Choose a text file');if(file.size>256*1024)throw new Error('Text file exceeds 256 KiB');const body=new FormData();body.append('file',file);return api<Scan>('/api/ssl-checks',{method:'POST',body})},onSuccess:data=>{cache.setQueryData(['ssl-check',data.id],data);cache.invalidateQueries({queryKey:['ssl-checks']});select(data.id)}});
+ function chooseFiles(files:File[]){
+  if(upload.isPending||!files.length)return;
+  upload.reset();setFileError(null);setFile(null);
+  if(files.length!==1){setFileError(new Error('Choose one .txt file at a time.'));return;}
+  const next=files[0];
+  if(!next.name.toLowerCase().endsWith('.txt')){setFileError(new Error('Choose a .txt file with one domain per line.'));return;}
+  if(next.size===0){setFileError(new Error('The text file is empty. Add one domain per line.'));return;}
+  if(next.size>256*1024){setFileError(new Error('Text file exceeds 256 KiB.'));return;}
+  setFile(next);
+ }
  const data=scan.data;
  const results=(data?.results||[]).filter(row=>(!status||row.status===status)&&Object.values(row).join(' ').toLowerCase().includes(search.toLowerCase())).slice().sort((a,b)=>{const left=a[sort],right=b[sort];return (typeof left==='number'&&typeof right==='number'?left-right:String(left).localeCompare(String(right)))*(ascending?1:-1)});
  function changeSort(key:keyof Result){if(sort===key)setAscending(!ascending);else{setSort(key);setAscending(true)}}
  return <>
   <div className="page-heading"><div><div className="eyebrow">DOMAIN CERTIFICATE HEALTH</div><h1>SSL expiry checker<span className="heading-dot">.</span></h1><p>Upload domains, review certificate expiry and download your Excel report.</p></div><Globe size={28}/></div>
-  <section className="panel ssl-upload"><div><h2>Check a domain list</h2><p>One public domain per line in a UTF-8 .txt file. Up to 500 domains, 256 KiB.</p><code>example.org<br/>www.python.org</code><p>Uses real DNS and TLS checks on port 443. No sandbox or login is needed. Wildcards are listed as not tested.</p></div><form onSubmit={e=>{e.preventDefault();upload.mutate()}}><label htmlFor="domain-list">Domain list (.txt)</label><input id="domain-list" type="file" accept=".txt,text/plain" onChange={e=>{setFile(e.target.files?.[0]||null);upload.reset()}}/><Button type="submit" disabled={!file||upload.isPending}>{upload.isPending?<Loader2 size={16} className="spin"/>:<Globe size={16}/>}Check certificates</Button><ErrorBox error={upload.error}/><small>Results expire after 7 days. Uploaded text is discarded after parsing.</small></form></section>
+  <section className="panel ssl-upload"><div><h2>Check a domain list</h2><p>One public domain per line in a UTF-8 .txt file. Up to 500 domains, 256 KiB.</p><code>example.org<br/>www.python.org</code><p>Uses real DNS and TLS checks on port 443. No sandbox or login is needed. Wildcards are listed as not tested.</p></div><form onSubmit={e=>{e.preventDefault();if(file&&!upload.isPending)upload.mutate()}}>
+   <input ref={fileInput} id="domain-list" className="sr-only" aria-label="Choose domain text file" type="file" accept=".txt,text/plain" disabled={upload.isPending} onChange={e=>{chooseFiles(Array.from(e.target.files||[]));e.target.value=''}}/>
+   <div className={`ssl-dropzone${dragging?' dragging':''}`} role="group" aria-label="Domain file upload" aria-disabled={upload.isPending}
+    onDragEnter={e=>{e.preventDefault();if(!upload.isPending&&e.dataTransfer.types.includes('Files')){dragDepth.current++;setDragging(true)}}}
+    onDragOver={e=>{e.preventDefault();e.dataTransfer.dropEffect=upload.isPending?'none':'copy'}}
+    onDragLeave={e=>{e.preventDefault();dragDepth.current=Math.max(0,dragDepth.current-1);if(!dragDepth.current)setDragging(false)}}
+    onDrop={e=>{e.preventDefault();e.stopPropagation();dragDepth.current=0;setDragging(false);chooseFiles(Array.from(e.dataTransfer.files))}}>
+    <UploadCloud size={32}/><strong>Drag &amp; drop your .txt file here</strong><span>or choose a file from your device</span>
+    <Button type="button" variant="outline" disabled={upload.isPending} onClick={()=>fileInput.current?.click()}><UploadCloud size={16}/>Upload TXT file</Button>
+    <small>One .txt file · Maximum 256 KiB</small>
+   </div>
+   {file&&<div className="ssl-selected-file" role="status"><FileText size={22}/><div><strong>{file.name}</strong><small>{size(file.size)} · Ready to check</small></div><button type="button" aria-label="Remove domain file" disabled={upload.isPending} onClick={()=>{setFile(null);setFileError(null);upload.reset()}}><X size={17}/></button></div>}
+   <ErrorBox error={fileError||upload.error}/>
+   <Button type="submit" disabled={!file||upload.isPending}>{upload.isPending?<Loader2 size={16} className="spin"/>:<Globe size={16}/>}Check certificates</Button>
+   <small>Results expire after 7 days. Uploaded text is discarded after parsing.</small>
+  </form></section>
   <ErrorBox error={scan.error}/>
   {data&&<section className="panel evidence-panel ssl-results"><div className="section-heading"><div><h2>{data.filename}</h2><p>Created {date(data.created_at)} · Expires {date(data.expires_at)}</p></div><Badge state={data.status}/>{!active(data.status)&&data.completed>0&&<Button asChild><a href={'/api/ssl-checks/'+id+'/report.xlsx'}><Download size={16}/>Download Excel</a></Button>}</div>
    {data.error&&<p role="alert">{data.error}</p>}

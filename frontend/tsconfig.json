@@ -32,7 +32,7 @@
     "**/*.ts",
     "**/*.tsx",
     "next-env.d.ts",
-    ".next-releases/cc245795dcf5fdb0c6665631/types/**/*.ts"
+    ".next-releases/32ca2de19a972f2dd5aba65d/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
