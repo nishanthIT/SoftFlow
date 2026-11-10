@@ -2,6 +2,10 @@ name: sentinelscan
 x-app: &app
   build: ./backend
   env_file: .env
+  environment:
+    WORKER_TEMP_PATH: /work
+    TMPDIR: /work
+    APP_ENV: production
   restart: unless-stopped
   init: true
   read_only: true
@@ -14,6 +18,8 @@ x-app: &app
   volumes:
     - ./yara:/yara:ro
     - ./ai-signatures:/ai-signatures:ro
+    # Unlinked temporary files live on disk, not the small /tmp tmpfs.
+    - upload-work:/work
   networks: [data, egress]
 services:
   proxy:
@@ -48,6 +54,12 @@ services:
       migrate: {condition: service_completed_successfully}
       storage-init: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
+  ssl-worker:
+    <<: *app
+    command: [celery, -A, app.tasks, worker, --hostname=ssl@%h, --queues=ssl, --loglevel=INFO, --concurrency=1, --max-tasks-per-child=20]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
   scheduler:
     <<: *app
     command: [celery, -A, app.tasks, beat, --loglevel=INFO, --schedule=/tmp/celerybeat-schedule]
@@ -55,6 +67,13 @@ services:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
     networks: [data]
+  maintenance:
+    <<: *app
+    command: [celery, -A, app.tasks, worker, --hostname=maintenance@%h, --queues=maintenance, --loglevel=INFO, --concurrency=1, --max-tasks-per-child=20]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      storage-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
   migrate:
     <<: *app
     restart: "no"
@@ -108,6 +127,7 @@ volumes:
   postgres-data:
   redis-data:
   minio-data:
+  upload-work:
 networks:
   edge:
   data:

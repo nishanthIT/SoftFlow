@@ -6,15 +6,17 @@
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build",
     "start": "next start --hostname 0.0.0.0",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-transform-types --test tests/*.test.mts"
   },
   "dependencies": {
+    "@noble/hashes": "2.4.0",
     "@radix-ui/react-slot": "^1.2.3",
     "@tanstack/react-query": "^5.87.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.468.0",
-    "next": "15.5.26",
+    "next": "15.5.29",
     "react": "19.1.4",
     "react-dom": "19.1.4",
     "tailwind-merge": "^3.3.1"
@@ -29,6 +31,7 @@
   },
   "overrides": {
     "postcss": "^8.5.23",
-    "sharp": "^0.35.4"
+    "sharp": "0.35.5",
+    "source-map-js": "1.2.2"
   }
 }

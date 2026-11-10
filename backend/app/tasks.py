@@ -1,20 +1,34 @@
 import json
 import logging
+from contextlib import ExitStack
 import httpx
 from celery import Celery
 from celery.exceptions import SoftTimeLimitExceeded
 from redis import Redis
 from sqlalchemy import select
 from .config import settings
-from .models import Session, Job, Sample, Engine, ENGINES, TERMINAL, now, record_models
-from . import providers, storage, static, policy
+from .models import Session, Job, Sample, Engine, SSLCheck, ENGINES, TERMINAL, now, record_models
+from . import providers, storage, static, policy, sample_io, intelligence, artifacts
 from .provider_status import diagnostic, sanitize
 from .reporting import build_report
+from .retention import FINISHED
+from .sandbox_cleanup import endpoint_identity
 from fastapi.encoders import jsonable_encoder
 
 log=logging.getLogger('sentinel.worker')
 celery=Celery('sentinel',broker=settings.redis_url,backend=settings.redis_url)
 celery.conf.update(task_acks_late=True,task_reject_on_worker_lost=True,worker_prefetch_multiplier=1,task_serializer='json',accept_content=['json'],broker_transport_options={'visibility_timeout':14400},beat_schedule={'dispatch':{'task':'app.tasks.dispatch','schedule':15.0}})
+celery.conf.beat_schedule.update({
+    'retention-daily': {'task':'app.tasks.cleanup', 'schedule':86400.0},
+    'retention-expiration-check': {'task':'app.tasks.cleanup', 'schedule':60.0},
+})
+celery.conf.task_routes={'app.tasks.cleanup': {'queue':'maintenance'},'app.tasks.dispatch': {'queue':'maintenance'},'app.tasks.ssl_run': {'queue':'ssl'}}
+
+
+@celery.task(name='app.tasks.cleanup', ignore_result=True)
+def cleanup():
+    from .retention import cleanup as sweep
+    return sweep(local_cache=settings.cuckoo_auto_start)
 
 def update(job_id,name,status,data=None,reason=None):
     with Session.begin() as db:
@@ -37,11 +51,13 @@ def execute(job_id,name,fn):
     try:
         data=fn()
         if data is None:
-            if name in ['behavior','network']:
+            if name in ['behavior','network','dns']:
                 upstream=snapshot(job_id)['sandbox']
                 raise providers.Unavailable('Sandbox telemetry is unavailable: '+(upstream.get('reason') or 'the sandbox report does not contain the required observations'))
             raise providers.Unavailable('Required upstream telemetry is unavailable')
-        update(job_id,name,'COMPLETED',data)
+        if name=='vulnerabilities' and data.get('status')!='COMPLETED':
+            update(job_id,name,'UNAVAILABLE',data,reason=data.get('reason') or 'Software identity or one or more intelligence sources could not be verified; available findings are preserved')
+        else:update(job_id,name,'COMPLETED',data)
         return data
     except providers.Unavailable as e: update(job_id,name,'UNAVAILABLE',reason=sanitize(str(e)),data={**snapshot(job_id)[name]['data'],'diagnostic':{'code':'ANALYSIS_UNAVAILABLE','message':sanitize(str(e))}})
     except providers.ProviderFailure as e: update(job_id,name,'FAILED',reason=sanitize(str(e)),data={**snapshot(job_id)[name]['data'],'diagnostic':{'code':'PROVIDER_FAILED','message':sanitize(str(e))}})
@@ -61,38 +77,63 @@ def dispatch():
     redis=Redis.from_url(settings.redis_url)
     for id in ids:
         if not redis.exists('analysis-lock:'+id): run.delay(id)
+    with Session() as db:
+        identifiers=list(db.scalars(select(SSLCheck.id).where(SSLCheck.status.in_(['QUEUED','RUNNING']))))
+    for identifier in identifiers:
+        if not redis.exists('ssl-lock:'+identifier):ssl_run.delay(identifier)
+
+
+@celery.task(name='app.tasks.ssl_run',soft_time_limit=1740,time_limit=1800,ignore_result=True)
+def ssl_run(identifier):
+    from .ssl_checks import run_scan
+    lock=Redis.from_url(settings.redis_url).lock('ssl-lock:'+identifier,timeout=1850,blocking=False)
+    if not lock.acquire(blocking=False):return
+    try:run_scan(identifier,Session)
+    finally:
+        try:lock.release()
+        except Exception:pass
 
 @celery.task(name='app.tasks.run',soft_time_limit=7100,time_limit=7200)
 def run(job_id):
     redis=Redis.from_url(settings.redis_url)
     lock=redis.lock('analysis-lock:'+job_id,timeout=7250,blocking=False)
     if not lock.acquire(blocking=False): return
+    resources=ExitStack()
     try:
         with Session.begin() as db:
-            job=db.get(Job,job_id)
-            if not job or job.status in ('COMPLETED','FAILED'): return
+            job=db.scalar(select(Job).where(Job.id==job_id).with_for_update())
+            if not job or job.status in FINISHED: return
+            if job.attempts>=3:raise RuntimeError('Analysis worker recovery limit reached')
+            job.attempts+=1
             job.status='RUNNING'; job.started_at=job.started_at or now()
+            existing=set(db.scalars(select(Engine.name).where(Engine.analysis_id==job_id)))
+            for name in ENGINES:
+                if name not in existing:db.add(Engine(analysis_id=job_id,name=name))
             sample=db.get(Sample,job.sample_id); sha=sample.sha256; consent=job.consent; filename=job.submitted_filename or sample.filename
             hashes={'sha256':sha,'sha1':sample.sha1,'md5':sample.md5}
-        data=storage.get('samples/'+sha)
-        import hashlib
-        actual={name:hashlib.new(name,data).hexdigest() for name in hashes}
+            declared_identity=job.software_identity
+        data=resources.enter_context(storage.materialize('samples/'+sha))
+        actual=sample_io.hashes(data)
         if actual!=hashes:raise ValueError('Stored sample integrity check failed')
         execute(job_id,'validation',lambda:{'format':'PE executable','validated':True})
         execute(job_id,'hashing',lambda:actual)
         st=execute(job_id,'static',lambda:static.analyze(data))
         yr=execute(job_id,'yara',lambda:static.scan_yara(data))
+        execute(job_id,'vulnerabilities',lambda:intelligence.assess(intelligence.identify(st,declared_identity,filename)))
         execute(job_id,'virustotal',lambda:providers.virustotal(data,sha,consent,lambda d:update(job_id,'virustotal','RUNNING',d)))
         execute(job_id,'hybrid-analysis',lambda:providers.hybrid(data,sha,consent,lambda d:update(job_id,'hybrid-analysis','RUNNING',d)))
         prior=snapshot(job_id)['sandbox']['data']
         def sandbox():
             provider=providers.sandbox_provider()
-            checkpoint=lambda d:update(job_id,'sandbox','RUNNING',d)
-            if settings.sandbox_kind=='cuckoo3':return provider.run(data,checkpoint,prior,filename=filename)
-            return provider.run(data,checkpoint,prior.get('task_id'))
+            identity={'endpoint_identity':prior.get('endpoint_identity', endpoint_identity())}
+            checkpoint=lambda d:update(job_id,'sandbox','RUNNING',{**d,**identity})
+            if settings.sandbox_kind=='cuckoo3':result=provider.run(data,checkpoint,prior,filename=filename,collect_artifacts=lambda client,task,report:artifacts.collect(client,job_id,task,report))
+            else:result=provider.run(data,checkpoint,prior.get('task_id'))
+            return {**result,**identity}
         sb=execute(job_id,'sandbox',sandbox)
         be=execute(job_id,'behavior',lambda:policy.behavior(sb))
         net=execute(job_id,'network',lambda:policy.network(sb))
+        execute(job_id,'dns',lambda:policy.dns(net))
         states=snapshot(job_id)
         ai=execute(job_id,'ai',lambda:policy.ai_detect(st,net,states['static']['status']=='COMPLETED',states['network']['status']=='COMPLETED',be))
         execute(job_id,'correlation',lambda:{'schema_version':1,'sample':hashes,'sources':{k:v for k,v in snapshot(job_id).items() if k not in ['correlation','verdict','report']}})
@@ -111,11 +152,13 @@ def run(job_id):
             rows=list(db.scalars(select(Engine).where(Engine.analysis_id==job_id)))
             report_engine=next(e for e in rows if e.name=='report')
             report_engine.status='COMPLETED';report_engine.completed_at=job.completed_at;report_engine.reason=None
-            report_engine.data={'object_key':'reports/'+job_id+'.json','format':'json','schema_version':'2.0','summary':vd}
+            report_engine.data={'object_key':'reports/'+job_id+'.json','pdf_object_key':'reports/'+job_id+'.pdf','formats':['json','html','pdf'],'format':'json','schema_version':'2.0','summary':vd}
             serialize=lambda row:{c.name:getattr(row,c.name) for c in row.__table__.columns}
             sample_data=serialize(db.get(Sample,job.sample_id));sample_data['filename']=filename
             report=build_report(serialize(job),sample_data,[serialize(e) for e in rows],job.completed_at.isoformat())
             storage.put('reports/'+job_id+'.json',json.dumps(jsonable_encoder(sanitize(report)),indent=2).encode(),'application/json')
+            from .pdf_report import render
+            storage.put('reports/'+job_id+'.pdf',render(sanitize(report)),'application/pdf')
     except Exception as e:
         log.error(json.dumps({'analysis_id':job_id,'error':type(e).__name__}))
         with Session.begin() as db:
@@ -127,5 +170,6 @@ def run(job_id):
                     row.data={**row.data,'diagnostic':{'code':'WORKER_FAILED','message':row.reason,'error_type':type(e).__name__}}
         raise
     finally:
+        resources.close()
         try: lock.release()
         except Exception: pass

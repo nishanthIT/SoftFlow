@@ -11,6 +11,8 @@ def evidence():
         'yara': {'rule_files':1,'matches':[]},
         'sandbox': {'task_id':'20261022-ABC123','report':{'tasks':[{}]}},
         'behavior': {'processes':[{'name':'test.exe'}]}, 'network': {'events':[]},
+        'dns': {'queries':[],'responses':[]},
+        'vulnerabilities': {'status':'COMPLETED','identity':{'name':'Fixture','version':'1.0'},'findings':[]},
         'virustotal': {'stats':{'undetected':30}},
         'verdict': {'score':0,'security':'LIKELY_BENIGN','reasons':[],'approval_policy':criteria()},
         'report': {'schema_version':'2.0'},
@@ -31,7 +33,7 @@ def test_missing_execution_never_approves(status):
     assert recommend('COMPLETED',engines)['recommendation']=='REVIEW_REQUIRED'
 
 
-@pytest.mark.parametrize('stage',['static','yara','sandbox','behavior','network','verdict'])
+@pytest.mark.parametrize('stage',['static','yara','sandbox','behavior','network','dns','vulnerabilities','verdict'])
 def test_success_flag_without_evidence_never_approves(stage):
     engines=evidence();next(e for e in engines if e['name']==stage)['data']={}
     assert recommend('COMPLETED',engines)['recommendation']=='REVIEW_REQUIRED'
@@ -64,3 +66,11 @@ def test_policy_snapshot_survives_configuration_change(monkeypatch):
 def test_inconclusive_finding_requires_review():
     engines=evidence();next(e for e in engines if e['name']=='verdict')['data']['security']='INCONCLUSIVE'
     assert recommend('COMPLETED',engines)['recommendation']=='REVIEW_REQUIRED'
+
+
+@pytest.mark.parametrize('classification',['CONFIRMED_AFFECTED','POTENTIALLY_AFFECTED','UNKNOWN'])
+def test_vulnerability_requires_review_without_becoming_malware(classification):
+    engines=evidence()
+    next(e for e in engines if e['name']=='vulnerabilities')['data']['findings']=[{'id':'CVE-fixture','classification':classification}]
+    assert recommend('COMPLETED',engines)['recommendation']=='REVIEW_REQUIRED'
+    assert policy.verdict({e['name']:e for e in engines})['score']==0

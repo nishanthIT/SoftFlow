@@ -3,6 +3,7 @@
 Run with the application environment. Never installs into that environment.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -46,17 +47,20 @@ def run(args, **kwargs):
 def bootstrap_python():
     """Install a pinned managed interpreter under .local; leave system Python alone."""
     tooling=ROOT/'.local/tools'
-    run([sys.executable,'-m','pip','install','--target',tooling,'uv=='+VERSIONS['uv_version']])
+    if not (tooling/'bin/uv').is_file():
+        run([sys.executable,'-m','pip','install','--target',tooling,'uv=='+VERSIONS['uv_version']])
     env=isolated_env()
     env.update(UV_PYTHON_INSTALL_DIR=str(ROOT/'.local/python'),UV_CACHE_DIR=str(ROOT/'.local/uv-cache'))
     uv=tooling/'bin/uv'
+    found=subprocess.run([str(uv),'python','find','--managed-python',VERSIONS['python_patch']],env=env,capture_output=True,text=True)
+    if found.returncode==0:return found.stdout.strip()
     run([uv,'python','install',VERSIONS['python_patch'],'--no-bin'],env=env)
     return run([uv,'python','find','--managed-python',VERSIONS['python_patch']],env=env,capture_output=True,text=True).stdout.strip()
 
 
 def install(values):
     venv, cwd, source = paths(values)
-    interpreter = values.get('CUCKOO_PYTHON') or 'python3.10'
+    interpreter = values.get('CUCKOO_PYTHON') or (str(venv/'bin/python') if (venv/'bin/python').exists() else 'python3.10')
     if '/' in interpreter:
         interpreter = str(path(values, 'CUCKOO_PYTHON', interpreter))
     if not shutil.which(interpreter):
@@ -75,10 +79,17 @@ def install(values):
     if not (venv/'bin/python').exists():run([interpreter, '-m', 'venv', venv])
     installed=run([venv/'bin/python','-c','import sys; print("%s.%s" % sys.version_info[:2])'],capture_output=True,text=True).stdout.strip()
     if installed != VERSIONS['python']:raise RuntimeError('Existing CUCKOO_VENV uses a different Python; choose a new directory')
-    run([venv/'bin/python', '-m', 'pip', 'install', '-r', ROOT/'sandbox/requirements.lock',
-         *[source/name for name in VERSIONS['packages']]])
+    stamp=venv/'.sentinel-install.json'
+    expected={'revision':VERSIONS['revision'],'requirements':hashlib.sha256((ROOT/'sandbox/requirements.lock').read_bytes()).hexdigest()}
+    current=json.loads(stamp.read_text()) if stamp.exists() else {}
+    healthy=subprocess.run([str(venv/'bin/python'),'-m','pip','check'],capture_output=True).returncode==0
+    if current!=expected or not healthy:
+        run([venv/'bin/python', '-m', 'pip', 'install', '-r', ROOT/'sandbox/requirements.lock',
+             *[source/name for name in VERSIONS['packages']]])
+    else:print('Pinned Cuckoo installation unchanged; checking dependencies without reinstalling')
     run([venv/'bin/python', '-m', 'pip', 'check'])
     run([venv/'bin/python', ROOT/'scripts/cuckoo_native_fix.py'])
+    stamp.write_text(json.dumps(expected))
     configure(values)
 
 
@@ -166,7 +177,9 @@ print(json.dumps({'machines':list(machines),'issues':issues,'tcpdump':c['tcpdump
             d=json.loads(p.stdout);check('machines',bool(d['machines']) and not d['issues'],d)
             check('packet_capture_enabled',d['tcpdump'],'Cuckoo tcpdump collection must be enabled')
     check('isolation',str(values.get('SANDBOX_ISOLATION_CONFIRMED','false')).lower()=='true','Requires verified guest isolation and clean snapshot restoration')
-    return {'ready':all(c['ok'] for c in checks),'version':VERSIONS['version'],'checks':checks}
+    return {'ready':all(c['ok'] for c in checks),
+            'prerequisites_ready':all(c['ok'] for c in checks if c['check']!='isolation'),
+            'version':VERSIONS['version'],'checks':checks}
 
 
 def host_config(values):
@@ -186,10 +199,11 @@ for name in ['machineries/qemu.yaml','cuckoo.yaml']:
  else:
   if sys.argv[3]:d['resultserver']['listen_ip']=sys.argv[3]
   if sys.argv[4]:d['tcpdump']['path']=sys.argv[4]
+  d['submit']['max_file_size']=int(sys.argv[5])*1024*1024
  f.write_text(yaml.safe_dump(d,sort_keys=False))
 '''
     run([venv/'bin/python','-c',code,cwd,values.get('CUCKOO_INTERFACE') or '',
-         values.get('CUCKOO_RESULTSERVER_IP') or '',values.get('CUCKOO_TCPDUMP') or ''])
+         values.get('CUCKOO_RESULTSERVER_IP') or '',values.get('CUCKOO_TCPDUMP') or '',str(min(2048,int(values.get('MAX_UPLOAD_MB') or '2048')))])
     print('Host paths configured. Previous YAML backed up; registered machines unchanged.')
 
 
@@ -204,7 +218,20 @@ def import_vms(values, directory):
     import ipaddress,socket
     ipaddress.ip_address(address)
     if interface not in {name for _,name in socket.if_nameindex()}:raise RuntimeError('Configured guest network interface does not exist')
-    run([venv/'bin/cuckoo','--cwd',cwd,'machine','import','qemu',directory])
+    # Upstream rejects importing an already registered name. Check the existing
+    # association rather than rewriting a potentially different operator VM.
+    code='import json,sys,yaml; from pathlib import Path; print(json.dumps(yaml.safe_load(Path(sys.argv[1]).read_text()).get("machines",{})))'
+    registered=json.loads(run([venv/'bin/python','-c',code,cwd/'conf/machineries/qemu.yaml'],capture_output=True,text=True).stdout)
+    missing=[]
+    for item in directory.iterdir():
+        info=item/'machineinfo.json'
+        if not info.is_file():continue
+        name=json.loads(info.read_text())['machine']['name']
+        if name in registered:
+            if Path(registered[name].get('machineinfo_path','')).resolve()!=info.resolve():
+                raise RuntimeError('Registered machine '+name+' points to different files; existing configuration was preserved')
+        else:missing.append(item.name)
+    if missing:run([venv/'bin/cuckoo','--cwd',cwd,'machine','import','qemu',directory,*missing])
     code='''import sys,yaml,shutil,os
 from pathlib import Path
 p=Path(sys.argv[1]);interface=sys.argv[2];address=sys.argv[3]

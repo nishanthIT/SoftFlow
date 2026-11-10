@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, ForeignKey, Integer, Boolean, JSON, UniqueConstraint, create_engine
+from sqlalchemy import String, DateTime, ForeignKey, Integer, BigInteger, Boolean, JSON, UniqueConstraint, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from .config import settings
 
@@ -19,7 +19,7 @@ class Sample(Base):
     sha1: Mapped[str] = mapped_column(String(40))
     md5: Mapped[str] = mapped_column(String(32))
     filename: Mapped[str] = mapped_column(String(255))
-    size: Mapped[int] = mapped_column(Integer)
+    size: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 class Job(Base):
     __tablename__ = 'analysis_jobs'
@@ -27,10 +27,54 @@ class Job(Base):
     sample_id: Mapped[str] = mapped_column(ForeignKey('samples.id'), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey('users.id'))
     status: Mapped[str] = mapped_column(String(20), default='QUEUED', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
     consent: Mapped[bool] = mapped_column(Boolean, default=False)
     submitted_filename: Mapped[str | None] = mapped_column(String(255))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    software_identity: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleanup_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleanup_error: Mapped[str | None] = mapped_column(String(100))
+class Maintenance(Base):
+    __tablename__ = 'maintenance_state'
+    name: Mapped[str] = mapped_column(String(40), primary_key=True)
+    last_full_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_temporary_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+class Upload(Base):
+    __tablename__ = 'uploads'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    filename: Mapped[str] = mapped_column(String(255))
+    size: Mapped[int] = mapped_column(BigInteger)
+    received: Mapped[int] = mapped_column(BigInteger, default=0)
+    consent: Mapped[bool] = mapped_column(Boolean, default=False)
+    software_identity: Mapped[dict] = mapped_column(JSON, default=dict)
+    state: Mapped[str] = mapped_column(String(20), default='OPEN')
+    analysis_id: Mapped[str | None] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+class UploadChunk(Base):
+    __tablename__ = 'upload_chunks'
+    upload_id: Mapped[str] = mapped_column(ForeignKey('uploads.id'), primary_key=True)
+    offset: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+class IntelligenceCache(Base):
+    __tablename__ = 'intelligence_cache'
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    data: Mapped[dict] = mapped_column(JSON)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+class SSLCheck(Base):
+    """Durable certificate checks with seven-day retention."""
+    __tablename__ = 'ssl_checks'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    filename: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(20), default='QUEUED', index=True)
+    domains: Mapped[list] = mapped_column(JSON)
+    results: Mapped[list] = mapped_column(JSON, default=list)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 class Engine(Base):
     __tablename__ = 'analysis_engine_results'
@@ -62,5 +106,5 @@ for table in ['static_results','sandbox_results','network_events','yara_matches'
     })
 engine = create_engine(settings.database_url, pool_pre_ping=True)
 Session = sessionmaker(engine, expire_on_commit=False)
-ENGINES = ['validation','hashing','static','yara','virustotal','hybrid-analysis','sandbox','behavior','network','ai','correlation','verdict','report']
+ENGINES = ['validation','hashing','static','yara','vulnerabilities','virustotal','hybrid-analysis','sandbox','behavior','network','dns','ai','correlation','verdict','report']
 TERMINAL = {'COMPLETED','FAILED','TIMEOUT','UNAVAILABLE','SKIPPED'}

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-if [[ ! -x .venv-local/bin/python ]]; then
-  printf 'Run ./setup-local.sh first.\n' >&2
-  exit 1
+if [[ ${1:-} == --prepared-app ]]; then
+  # Full setup already owns setup.lock and has installed these dependencies.
+  shift
+else
+  python3 scripts/prepare_app.py "$@"
 fi
-exec .venv-local/bin/python scripts/local.py start
+exec .venv-local/bin/python scripts/local.py start "$@"

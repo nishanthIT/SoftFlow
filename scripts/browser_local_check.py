@@ -1,4 +1,4 @@
-"""Unauthenticated browser check against the actual application; no API mocks."""
+"""Direct LAN browser access against the actual application; no API mocks."""
 from pathlib import Path
 import os,shutil,json
 from dotenv import dotenv_values
@@ -14,18 +14,29 @@ with sync_playwright() as p:
     page.on('pageerror',lambda e:errors.append(str(e)))
     page.goto(base)
     page.get_by_role('heading',name='Security overview.').wait_for()
+    assert page.get_by_role('button',name='Sign in',exact=True).count()==0
+    assert page.get_by_role('button',name='Sign out',exact=True).count()==0
+    assert not page.context.cookies()
+    assert page.get_by_role('link',name='SSL expiry checker',exact=True).count()==1
+    assert page.request.get(base+'/api/ssl-checks').status==200
+    assert page.request.get(base+'/ssl-checker').status==200
     if os.environ.get('VERIFY_UPLOAD')=='1':
         page.goto(base+'/upload')
         page.get_by_label('Choose executable').set_input_files(str(root/'.local/verification/sentinelscan-smoke.exe'))
-        with page.expect_response(lambda r:r.url.endswith('/api/samples') and r.request.method=='POST') as submitted:
+        if os.environ.get('VERIFY_SOFTWARE_NAME'):
+            page.get_by_label('Software name',exact=True).fill(os.environ['VERIFY_SOFTWARE_NAME'])
+            page.get_by_label('Software version',exact=True).fill(os.environ['VERIFY_SOFTWARE_VERSION'])
+        with page.expect_response(lambda r:'/api/uploads/' in r.url and r.url.endswith('/complete') and r.request.method=='POST') as submitted:
             page.get_by_role('button',name='Start analysis').click()
         assert submitted.value.status==201,submitted.value.text()
         analysis=submitted.value.json()['analysis_id']
         page.wait_for_url('**/analysis/'+analysis)
-        page.wait_for_function("""async id=>{
-            const r=await fetch('/api/analysis/'+id);const j=await r.json();
-            return ['COMPLETED','FAILED'].includes(j.status);
-        }""",arg=analysis,timeout=240000,polling=2000)
+        import time
+        deadline=time.monotonic()+240
+        while time.monotonic()<deadline:
+            if page.request.get(base+'/api/analysis/'+analysis).json()['status'] in ('COMPLETED','FAILED'):break
+            page.wait_for_timeout(1000)
+        else:raise RuntimeError('Analysis did not finish during browser verification')
         page.reload()
         page.get_by_role('heading',name='Approval decision',exact=True).wait_for()
         assert page.get_by_label('Decision',exact=True).locator('option[value=APPROVE]').evaluate('(e)=>e.disabled')
@@ -51,6 +62,24 @@ with sync_playwright() as p:
     download.value.save_as(str(target))
     exported=json.loads(target.read_text())
     assert exported['schema_version']=='2.0' and exported['analysis_id']==analysis
+    if os.environ.get('VERIFY_SOFTWARE_NAME'):
+        assessment=exported['vulnerability_assessment']
+        assert assessment['identity']['name']==os.environ['VERIFY_SOFTWARE_NAME']
+        assert assessment['identity']['version']==os.environ['VERIFY_SOFTWARE_VERSION']
+        assert assessment['identity']['source']=='User-supplied product and version'
+        assert assessment['summary']['CONFIRMED_AFFECTED']>0
+        assert 'affect this version' in assessment['conclusion']
+        page.get_by_text(assessment['conclusion'],exact=True).first.wait_for()
+    with page.expect_download() as pdf_download:
+        page.get_by_role('link',name='Download PDF').click()
+    pdf_target=root/'.local/verification/browser-export.pdf'
+    pdf_download.value.save_as(str(pdf_target))
+    assert pdf_target.read_bytes().startswith(b'%PDF-')
+    if os.environ.get('VERIFY_SOFTWARE_NAME'):
+        import subprocess
+        text=subprocess.check_output(['pdftotext',str(pdf_target),'-'],text=True)
+        assert os.environ['VERIFY_SOFTWARE_NAME'] in text and os.environ['VERIFY_SOFTWARE_VERSION'] in text
+        assert any(item['id'] in text for item in exported['vulnerability_assessment']['findings'])
     if os.environ.get('VERIFY_UPLOAD')=='1':
         assert exported['approval']['recommendation']=='REVIEW_REQUIRED'
         assert exported['decisions'][0]['data']['decision']=='REVIEW_REQUIRED'
@@ -67,7 +96,7 @@ with sync_playwright() as p:
     page.goto(base+'/analysis/'+analysis+'/report')
     page.wait_for_load_state('networkidle')
     assert page.locator('body').evaluate('(e)=>e.scrollWidth<=innerWidth')
-    page.screenshot(path=str(root/'.local/demo/mobile-report.png'),full_page=True)
+    page.screenshot(path=str(root/'.local/verification/mobile-report.png'),full_page=True)
     assert not errors,errors
     browser.close()
 print('Live browser checks passed; no mocked endpoints.')

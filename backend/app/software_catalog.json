@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "products": [
+    {
+      "names": ["7-Zip"],
+      "vendors": ["Igor Pavlov"],
+      "cpe_prefixes": ["cpe:2.3:a:7-zip:7-zip"],
+      "packages": [],
+      "reference": "https://www.7-zip.org/"
+    }
+  ]
+}

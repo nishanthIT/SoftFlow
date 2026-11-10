@@ -3,17 +3,17 @@ from .config import settings
 
 LIMITATIONS = [
     'No malicious behavior detected is not proof of safety or absence of vulnerabilities.',
-    'This workflow does not perform CVE matching, dependency auditing, or vulnerability scanning.',
+    'Advisory matching uses identified product metadata and published version ranges. It is not a dependency audit, exploit test, or proof of binary authenticity.',
     'Dynamic coverage is limited to the configured guest, execution time, and available telemetry.',
 ]
 
 
 def criteria():
-    return {'version': '1.0', 'max_approve_score': settings.approval_max_score,
+    return {'version': '1.1', 'max_approve_score': settings.approval_max_score,
             'reject_score': settings.approval_reject_score,
             'require_reputation': settings.approval_require_reputation,
             'min_reputation_engines': settings.approval_min_reputation_engines,
-            'required_engines': ['validation', 'hashing', 'static', 'yara', 'sandbox', 'behavior', 'network', 'verdict', 'report']}
+            'required_engines': ['validation', 'hashing', 'static', 'yara', 'vulnerabilities', 'sandbox', 'behavior', 'network', 'dns', 'verdict', 'report']}
 
 
 def recommend(status, engines):
@@ -39,6 +39,8 @@ def recommend(status, engines):
             'sandbox': bool(data('sandbox').get('task_id') and data('sandbox').get('report')),
             'behavior': bool(data('behavior').get('processes')),
             'network': isinstance(data('network').get('events'), list),
+            'dns': isinstance(data('dns').get('queries'), list) and isinstance(data('dns').get('responses'), list),
+            'vulnerabilities': data('vulnerabilities').get('status')=='COMPLETED' and bool(data('vulnerabilities').get('identity',{}).get('version')),
             'verdict': isinstance(finding.get('score'), (int, float)) and bool(finding.get('security')),
         }
         for name, present in evidence_checks.items():
@@ -59,6 +61,8 @@ def recommend(status, engines):
             reasons.append(f"Malware score {score} exceeds acceptance threshold {rules['max_approve_score']}; review the findings.")
         elif finding.get('reasons'):
             reasons.append('Adverse findings require review even when the configured score permits acceptance.')
+        elif any(f.get('classification')!='NOT_AFFECTED' for f in data('vulnerabilities').get('findings',[])):
+            reasons.append('Applicable or uncertain published vulnerabilities require review and remediation before approval.')
         elif rules['require_reputation'] and clean_votes < rules['min_reputation_engines']:
             reasons.append(f"Only {clean_votes} supporting reputation results; {rules['min_reputation_engines']} required.")
         else:

@@ -7,7 +7,7 @@ NAMES={'virustotal':'VirusTotal','hybrid-analysis':'Hybrid Analysis','sandbox':'
 _CACHE={};_LOCK=threading.Lock()
 
 def sanitize(value):
-    secrets=[settings.virustotal_api_key,settings.hybrid_analysis_api_key,settings.cuckoo_api_token,settings.minio_secret_key]
+    secrets=[settings.virustotal_api_key,settings.hybrid_analysis_api_key,settings.cuckoo_api_token,settings.minio_secret_key,settings.nvd_api_key,settings.github_advisories_token]
     if isinstance(value,str):
         for secret in secrets:
             if secret and len(secret)>7:value=value.replace(secret,'[REDACTED]')
@@ -40,6 +40,14 @@ def diagnostic(name,error):
     return {'code':code,'status':state,'message':message,'retry_after_seconds':retry_after}
 
 def check(name,refresh=False):
+    if name=='sandbox' and not settings.sandbox_enabled:
+        return {'name':NAMES[name],'id':name,'configured':bool(settings.cuckoo_api_url),
+                'status':'DISABLED','execution_ready':False,'isolation_confirmed':False,
+                'message':'Sandbox execution is disabled by configuration. Static analysis and reports are available.'}
+    if name=='sandbox' and settings.presentation_mode:
+        return {'name':NAMES[name],'id':name,'configured':bool(settings.cuckoo_api_url),
+                'status':'DISABLED','execution_ready':False,'isolation_confirmed':False,
+                'message':'Sandbox execution is disabled in presentation mode. Static analysis and reports remain available.'}
     key={'virustotal':settings.virustotal_api_key,'hybrid-analysis':settings.hybrid_analysis_api_key,'sandbox':settings.cuckoo_api_token}.get(name,'')
     configured=bool(settings.cuckoo_api_url) if name=='sandbox' else bool(key)
     identity=(name,hashlib.sha256(key.encode()).hexdigest(),settings.cuckoo_api_url,settings.sandbox_kind,settings.sandbox_isolation_confirmed,settings.sandbox_os_version)

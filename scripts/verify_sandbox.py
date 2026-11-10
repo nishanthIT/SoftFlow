@@ -60,19 +60,30 @@ def main():
             assert report['final_status']==job['final_status']
             assert len(report['steps'])==len(job['engines'])
             assert report['approval']['reasons'] and report['approval']['limitations']
-            if not all(states.get(k)=='COMPLETED' for k in ['sandbox','behavior','network']):
+            if not all(states.get(k)=='COMPLETED' for k in ['sandbox','behavior','network','dns']):
                 assert report['approval']['recommendation']=='REVIEW_REQUIRED'
             assert all(s['status'] not in ['RUNNING','QUEUED'] for s in report['steps'])
-            for key in ['AUTH_SECRET','ADMIN_PASSWORD','CUCKOO_API_TOKEN','VIRUSTOTAL_API_KEY','HYBRID_ANALYSIS_API_KEY']:
+            for key in ['AUTH_PASSWORD_HASH','AUTH_SECRET','ADMIN_PASSWORD','CUCKOO_API_TOKEN','VIRUSTOTAL_API_KEY','HYBRID_ANALYSIS_API_KEY','NVD_API_KEY','GITHUB_ADVISORIES_TOKEN']:
                 assert not values.get(key) or values[key] not in r.text,'Secret leaked in export'
             (output/'report.json').write_text(json.dumps(report,indent=2))
+            pdf=client.get('/api/analysis/'+identifier+'/report.pdf');pdf.raise_for_status()
+            assert pdf.headers['content-type']=='application/pdf' and pdf.content.startswith(b'%PDF-')
+            (output/'report.pdf').write_bytes(pdf.content)
+            assert client.get('/api/samples/'+job['sample_id']).json()['analyses'][0]['expires_at']
             status.update(final_status=report['final_status'],engine_states=states,
                           recommendation=report['approval']['recommendation'],
                           workflow_verified=job['status']=='COMPLETED' and states['report']=='COMPLETED',
-                          sandbox_verified=all(states.get(k)=='COMPLETED' for k in ['sandbox','behavior','network']))
-            if status['sandbox_verified']:
+                          pdf_verified=True,history_expiration_verified=True,
+                          sandbox_verified=False)
+            if all(states.get(k)=='COMPLETED' for k in ['sandbox','behavior','network','dns']):
                 sb=next(e['data'] for e in report['engines'] if e['name']=='sandbox')
                 assert sb['source']=='cuckoo3' and sb['report']['analysis']['submitted']['sha256']==sha
+                observed={e['name']:e['data'] for e in report['engines']}
+                assert observed['behavior']['processes'],'No monitored process was recorded'
+                if args.sample is None:
+                    assert any(q.get('domain')=='sentinelscan-smoke.invalid' for q in observed['dns']['queries']),'Built-in smoke DNS request was not captured'
+                assert any(f['kind']=='pcap' for f in sb.get('artifacts',{}).get('files',[])),'PCAP artifact was not collected'
+                status['sandbox_verified']=True
                 status['cuckoo_analysis_id']=sb['task_id']
             print(json.dumps(status,indent=2),flush=True)
             return 0 if status['workflow_verified'] and status['sandbox_verified'] else 2

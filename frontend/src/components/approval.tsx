@@ -17,7 +17,7 @@ export function ApprovalPanel({analysis}:{analysis:Analysis}) {
     <p>Recommendation: <Badge state={assessment?.recommendation||'REVIEW_REQUIRED'}/></p>
     <p>Analysis status: {human(assessment?.analysis_status||analysis.status)}</p>
     <ul>{assessment?.reasons.map((r:string)=><li key={r}>{r}</li>)}</ul>
-    <p>No malicious behavior detected does not establish that software has no vulnerabilities. Vulnerability assessment: not performed.</p>
+    <p>No malicious behavior detected does not establish that software has no vulnerabilities. Vulnerability assessment: {human(analysis.engines.find(e=>e.name==='vulnerabilities')?.data.status||'NOT_PERFORMED')}.</p>
     <details><summary>Decision criteria, findings and limitations</summary><JsonEvidence data={assessment}/></details>
     <h3>Record a workspace decision</h3>
     <form onSubmit={async e=>{

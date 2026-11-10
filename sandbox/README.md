@@ -23,6 +23,9 @@ This application's `SANDBOX_KIND=cuckoo` adapter targets the legacy Cuckoo 2 RES
 
 ## Managed local Cuckoo 3 workflow
 
+The supported one-time entry point is `npm run setup -- --accept-windows-license`, followed by `npm start`. It orchestrates the lower-level commands below, verifies host isolation, and checks that a harmless guest marker disappears after restoring the same snapshot. The verification also hashes the base disk, memory snapshot and machine configuration before/after to detect changes. The flag is set only after these checks succeed. Guest verification has not run on this host because sudo authentication, the bridge and guest image are still missing. Use `npm run setup -- --check` for the current prerequisite report. Detailed evidence is in [implementation verification](../docs/IMPLEMENTATION_VERIFICATION.md).
+
+
 This checkout pins **Cuckoo 3.0.1 / Python 3.10** and a specific VMCloak revision in `versions.json`; application Python is separate. API routes are checked against the installed `cert-ee/cuckoo3` source and [official API documentation](https://cuckoo-hatch.cert.ee/static/docs/using/web-api-endpoints/). `requirements.lock` and `vmcloak-requirements.lock` contain separate dependency sets.
 
 A compatible Windows guest and clean snapshot are required for real Windows behavioral analysis. The application can run static checks without them, but must report unavailable sandbox coverage. This helper is one way to provision the guest; an existing compatible Cuckoo deployment can also be used. The `download` command only prepares installation media and does not start a VM or allocate guest RAM.
@@ -66,9 +69,9 @@ Verify guest-agent reachability on the isolated bridge, the monitor/result-serve
 .venv-local/bin/python scripts/verify_sandbox.py
 ```
 
-`./start` manages core (which starts its processing/result services) and the authenticated loopback API when `CUCKOO_AUTO_START=true`. The application itself has no login. `doctor` checks the pinned package environment, system tools, monitor payload, KVM/capture access, configured machine files, interfaces, result-server address, and isolation attestation. A successful doctor is a prerequisite check, not proof of guest execution or snapshot restoration.
+`./start` manages core (which starts its processing/result services) and the authenticated loopback API when `CUCKOO_AUTO_START=true`. The application has no login; the Cuckoo management API still requires its own token. `doctor` checks the pinned package environment, system tools, monitor payload, KVM/capture access, configured machine files, interfaces, result-server address, and isolation attestation. A successful doctor is a prerequisite check, not proof of guest execution or snapshot restoration.
 
-Live verification must return success with a real matching task report, observed processes and captured network metadata. An API health response or synthetic unit fixture is not sufficient. Keep `SANDBOX_ISOLATION_CONFIRMED=false` until isolation/restoration have actually been checked. No setup script silently changes that flag.
+Live verification must return success with a real matching task report, observed processes and captured network metadata. An API health response or synthetic unit fixture is not sufficient. Keep `SANDBOX_ISOLATION_CONFIRMED=false` until isolation/restoration have actually been checked. Automated setup changes that flag only after its host checks and two-boot restoration verification succeed; it then verifies actual monitored execution through the application.
 
 ## ISO download fails with `No space left on device`
 
@@ -97,3 +100,9 @@ Free space on the filesystem shown by `df`. With all fragments already present a
 ```
 
 If the current filesystem is too small, choose a mounted filesystem with enough capacity, move the existing `.parts` directory alongside the new ISO location, and set `CUCKOO_WINDOWS_ISO` in `.env` to that ISO's absolute path. Keep its basename unchanged so the fragment directory is found. Moving files within the same filesystem does not increase its available space. Guest extraction uses `CUCKOO_ISO_MOUNT`, and guest images use `VMCLOAK_CWD`; relocating only the ISO does not relocate those larger artifacts.
+
+## Analysis retention
+
+The application automatically expires history and owned files after 168 hours, with a daily storage sweep and safe retries. Its dedicated maintenance worker checks saved Cuckoo/CAPE task IDs and current terminal states before calling the provider's deletion endpoint. Grant the connected API credential task-deletion access (CAPE also requires its task-delete API to be enabled). A locally timed-out analysis can still be running upstream and is protected until that service confirms it has finished.
+
+See [automatic seven-day retention](../README.md#automatic-seven-day-retention) for storage ownership, startup, retry behavior and tests. Managed local Cuckoo shared binary caches are collected during an idle daily maintenance window with API/core writers stopped and a complete ownership inventory. Unmanaged remote caches, VM snapshots, independent backups and third-party reputation copies require retention in their owning systems.

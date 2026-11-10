@@ -14,18 +14,24 @@ import {
 } from 'lucide-react';
 
 import { api, size } from '@/lib/api';
+import {discardUpload,uploadFile,UploadProgress} from '@/lib/upload';
 import { Button } from './ui/button';
 import { ErrorBox } from './common';
 
 export function UploadPage() {
   const router = useRouter();
   const input = useRef<HTMLInputElement>(null);
+  const controller = useRef<AbortController|null>(null);
 
   const [file, setFile] = useState<File | null>(null);
   const [drag, setDrag] = useState(false);
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [progress,setProgress]=useState<UploadProgress|null>(null);
+  const [session,setSession]=useState<string|null>(null);
+  const [paused,setPaused]=useState(false);
+  const [softwareName,setSoftwareName]=useState(''),[softwareVersion,setSoftwareVersion]=useState('');
 
   const config = useQuery({
     queryKey: ['settings'],
@@ -33,7 +39,9 @@ export function UploadPage() {
   });
 
   function select(f?: File) {
+    if(busy)return;
     setError(null);
+    setProgress(null);setSession(null);setPaused(false);
 
     setFile(null);
     if (!f) return;
@@ -45,38 +53,35 @@ export function UploadPage() {
 
     if (
       f.size >
-      (config.data?.max_upload_mb || 32) * 1048576
+      (config.data?.max_upload_mb || 2048) * 1048576
     ) {
       setError(new Error('This file exceeds the configured upload limit.'));
       return;
     }
+    if(f.size<64){setError(new Error('The file is too small to be a Windows executable.'));return;}
 
     setFile(f);
   }
 
   async function submit() {
     if (!file) return;
+    if(Boolean(softwareName.trim())!==Boolean(softwareVersion.trim())){setError(new Error('Enter both software name and version, or leave both empty for automatic detection.'));return;}
 
     setBusy(true);
     setError(null);
-
-    const body = new FormData();
-
-    body.append('file', file);
-    body.append('external_consent', String(consent));
+    setPaused(false);
+    const current=new AbortController();controller.current=current;
 
     try {
-      const r = await api('/api/samples', {
-        method: 'POST',
-        body,
-      });
-
-      router.push('/analysis/' + r.analysis_id);
+      const identifier=await uploadFile(file,consent,current.signal,setProgress,setSession,softwareName.trim()?{name:softwareName.trim(),version:softwareVersion.trim()}:undefined);
+      router.push('/analysis/' + identifier);
     } catch (e) {
-      setError(e as Error);
+      if(current.signal.aborted)setPaused(true);else setError(e instanceof Error?e:new Error('Upload failed'));
       setBusy(false);
     }
   }
+
+  async function discard(){if(!session)return;setBusy(true);setError(null);try{await discardUpload(session);setSession(null);setProgress(null);setPaused(false)}catch(e){setError(e as Error)}finally{setBusy(false)}}
 
   return (
     <>
@@ -107,6 +112,7 @@ export function UploadPage() {
             ref={input}
             type="file"
             accept=".exe"
+            disabled={busy}
             className="sr-only"
             aria-label="Choose executable"
             onChange={(e) => select(e.target.files?.[0])}
@@ -139,7 +145,7 @@ export function UploadPage() {
 
             <small>
               .EXE files only · Up to{' '}
-              {config.data?.max_upload_mb || 32} MB
+              {size((config.data?.max_upload_mb || 2048)*1048576)}
             </small>
           </button>
 
@@ -164,6 +170,13 @@ export function UploadPage() {
               </button>
             </div>
           )}
+
+          <div className="software-identity-form">
+            <h3>Software vulnerability lookup</h3>
+            <p>Product name and version are detected from the executable. Enter them here if they are missing or need correcting.</p>
+            <div><label>Software name<input value={softwareName} onChange={e=>setSoftwareName(e.target.value)} placeholder="e.g. 7-Zip" maxLength={160} disabled={busy||!!session}/></label><label>Software version<input value={softwareVersion} onChange={e=>setSoftwareVersion(e.target.value)} placeholder="e.g. 16.00" maxLength={128} disabled={busy||!!session}/></label></div>
+            <small>Published product/version advisories are checked automatically. Name and version may be sent to advisory providers.</small>
+          </div>
 
           <div className="consent-box">
             <LockKeyhole size={19} />
@@ -199,6 +212,12 @@ export function UploadPage() {
           </div>
 
           <ErrorBox error={error} />
+          {progress&&<div className="upload-progress" aria-live="polite">
+            <p><strong>{paused?'Upload paused':progress.phase==='hashing'?'Checking file fingerprint':progress.phase==='finalizing'?'Validating and saving file':'Uploading file'}</strong>{progress.resumed?' · Resumed from saved chunks':''}</p>
+            <div className="progress-track" role="progressbar" aria-label={progress.phase==='hashing'?'File fingerprint progress':'Upload progress'} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress.bytes/progress.total*100)}><div style={{width:`${progress.bytes/progress.total*100}%`}}/></div>
+            <p>{size(progress.bytes)} / {size(progress.total)}{progress.bytesPerSecond>0&&!paused?` · ${size(progress.bytesPerSecond)}/s`:''}</p>
+          </div>}
+          {(paused||error)&&session&&<p>Choose the same file and retry to resume. Inactive upload chunks expire after one hour.</p>}
 
           <div className="upload-actions">
             <span>
@@ -206,13 +225,16 @@ export function UploadPage() {
               Isolated execution only
             </span>
 
+            {busy&&progress?.phase!=='finalizing'&&<Button variant="outline" onClick={()=>controller.current?.abort()}>Pause</Button>}
+            {!busy&&session&&<Button variant="outline" onClick={discard}>Discard upload</Button>}
+
             <Button
               disabled={!file || busy}
               onClick={submit}
             >
               {busy
-                ? 'Uploading & validating…'
-                : 'Start analysis'}
+                ? progress?.phase==='finalizing'?'Validating file…':'Preparing upload…'
+                : session?'Resume analysis':'Start analysis'}
 
               <ArrowRight size={16} />
             </Button>
@@ -236,7 +258,7 @@ export function UploadPage() {
               [
                 '02',
                 'Inspect & observe',
-                'Run static rules, query reputation, and request isolated execution.',
+                'Identify software and version, check published vulnerabilities, and run static and reputation checks.',
               ],
               [
                 '03',
@@ -266,7 +288,7 @@ export function UploadPage() {
 
             <p>
               Unavailable engines are clearly identified. An incomplete
-              analysis is never treated as clean.
+              analysis is never treated as clean. Files and reports are retained for 7 days. Uploads resume after temporary connection failures.
             </p>
           </div>
         </aside>

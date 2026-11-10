@@ -23,11 +23,58 @@ def command(*args,**kwargs):
     return subprocess.run(list(args),check=True,**kwargs)
 
 
+def firewall_rules(bridge,address,port):
+    return f'''table inet sentinelscan_cuckoo {{
+ chain input {{ type filter hook input priority -200; policy accept;
+  iifname "{bridge}" ct state established,related accept
+  iifname "{bridge}" ip daddr {address} tcp dport {port} accept
+  iifname "{bridge}" drop
+ }}
+ chain forward {{ type filter hook forward priority -200; policy accept;
+  iifname "{bridge}" drop
+  oifname "{bridge}" drop
+ }}
+}}
+'''
+
+
+def verify_firewall(bridge,address,port):
+    expected=firewall_rules(bridge,address,port)
+    # -n also renders conntrack states as 0x2,0x4 on recent nftables.
+    # Only priorities need numeric rendering; retain symbolic state names.
+    result=subprocess.run(['nft','--numeric-priority','list','table','inet','sentinelscan_cuckoo'],capture_output=True,text=True)
+    # Compare the whole dedicated table, including rule order. An extra accept
+    # rule must invalidate the proof even if a final drop is still present.
+    normalize=lambda value:re.sub(r'\s+','',value)
+    verified=result.returncode==0 and normalize(result.stdout)==normalize(expected)
+    return verified,{'expected':expected,'observed':result.stdout,'error':result.stderr.strip(),'exit_code':result.returncode}
+
+
+def verify(plan,account):
+    """Read-only proof of the installed isolation controls, not guest restoration."""
+    bridge=plan['interface'];address=plan['resultserver_ip'];port=plan['resultserver_port']
+    checks={}
+    devices=json.loads(command('ip','-j','address','show',capture_output=True,text=True).stdout)
+    device=next((d for d in devices if d['ifname']==bridge),{})
+    checks['bridge']=Path('/sys/class/net',bridge,'bridge').exists() and 'UP' in device.get('flags',[])
+    checks['address']=any(a.get('local')==address and a.get('prefixlen')==ipaddress.ip_network(plan['network']).prefixlen for a in device.get('addr_info',[]))
+    checks['firewall'],firewall_evidence=verify_firewall(bridge,address,port)
+    private=Path('/usr/local/libexec/sentinelscan')
+    for name,mode in [('qemu-bridge-helper',0o4750),('tcpdump',0o750)]:
+        file=private/name
+        stat=file.stat() if file.exists() else None
+        checks[name]=bool(stat and stat.st_uid==0 and stat.st_gid==account.pw_gid and stat.st_mode&0o7777==mode)
+    cap=subprocess.run(['getcap',str(private/'tcpdump')],capture_output=True,text=True)
+    checks['capture_capabilities']=cap.returncode==0 and 'cap_net_admin' in cap.stdout and 'cap_net_raw' in cap.stdout
+    return {'verified':all(checks.values()),'checks':checks,'diagnostics':{} if checks['firewall'] else {'firewall':firewall_evidence},'scope':'host isolation only; guest execution and snapshot restoration require live verification','plan':plan}
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plan',type=Path,default=ROOT/'.local/run/cuckoo-host-plan.json')
     parser.add_argument('--user',default=os.environ.get('SUDO_USER'))
     parser.add_argument('--install-service',action='store_true',help='Install a root-owned boot service to restore the isolated bridge after reboot')
+    parser.add_argument('--verify-json',action='store_true',help='Read-only validation of the installed bridge, exact firewall rules and restricted helpers')
     args=parser.parse_args()
     if os.geteuid()!=0:raise RuntimeError('Run this host setup script with sudo')
     plan=json.loads(args.plan.read_text())
@@ -43,6 +90,8 @@ def main():
     if not 1024<=port<=65535:raise RuntimeError('Invalid resultserver port')
     for binary in ['ip','nft','setcap','setfacl','tcpdump']:
         if not shutil.which(binary):raise RuntimeError('Required host command missing: '+binary)
+    if args.verify_json:
+        result=verify(plan,account);print(json.dumps(result,indent=2));return 0 if result['verified'] else 2
     devices=json.loads(command('ip','-j','address','show',capture_output=True,text=True).stdout)
     for device in devices:
         if device['ifname']==bridge:continue
@@ -56,18 +105,7 @@ def main():
         if addresses and addresses!=[str(address)]:raise RuntimeError('Existing bridge has different addresses')
     else:command('ip','link','add',bridge,'type','bridge')
     # Dedicated table; transactional replacement leaves other firewalls intact.
-    rules=f'''table inet sentinelscan_cuckoo {{
- chain input {{ type filter hook input priority -200; policy accept;
-  iifname "{bridge}" ct state established,related accept
-  iifname "{bridge}" ip daddr {address} tcp dport {port} accept
-  iifname "{bridge}" drop
- }}
- chain forward {{ type filter hook forward priority -200; policy accept;
-  iifname "{bridge}" drop
-  oifname "{bridge}" drop
- }}
-}}
-'''
+    rules=firewall_rules(bridge,address,port)
     existing_table=subprocess.run(['nft','list','table','inet','sentinelscan_cuckoo'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
     command('nft','-f','-',input=('delete table inet sentinelscan_cuckoo\n' if existing_table else '')+rules,text=True)
     command('ip','address','replace',str(address)+'/'+str(network.prefixlen),'dev',bridge)
@@ -112,6 +150,6 @@ WantedBy=multi-user.target
 
 
 if __name__=='__main__':
-    try:main()
+    try:sys.exit(main())
     except (RuntimeError,OSError,subprocess.CalledProcessError) as error:
         print('Host setup failed: '+str(error),file=sys.stderr);sys.exit(1)

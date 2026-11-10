@@ -10,10 +10,27 @@ def domain_match(value, domain):
     h = host(value)
     return h == domain or h.endswith('.'+domain)
 
+def monitoring(result):
+    if result is None:return None
+    return {**result,'monitoring_status':'OPERATIONAL','traffic_status':'OBSERVED' if result['events'] else 'NO_TRAFFIC_OBSERVED',
+            'network_policy':settings.sandbox_network_policy,
+            'policy_note':'External network access is intentionally blocked by the configured sandbox policy.' if settings.sandbox_network_policy=='blocked' else 'Network restrictions are determined by the configured sandbox.'}
+
+def dns(net):
+    if not net or not net.get('dns_available'):return None
+    queries=[e for e in net['events'] if e['type']=='dns']
+    responses=[e for e in net['events'] if e['type']=='dns_response']
+    for query in queries:
+        responses.extend({'domain':query.get('domain'),'source':query.get('source'),'answer':answer} for answer in query.get('answers',[]))
+    return {'queries':queries,'responses':responses,'monitoring_status':'OPERATIONAL',
+            'traffic_status':'OBSERVED' if queries or responses else 'NO_DNS_OBSERVED',
+            'network_policy':net['network_policy'],'events_truncated':net.get('events_truncated',False),
+            'limitations':'Only captured DNS is shown. Responses are not attributed to a query unless the source supplies that association.'}
+
 def network(sandbox):
     if sandbox.get('source') == 'cuckoo3':
         from .cuckoo3_results import network as normalize
-        return normalize(sandbox)
+        return monitoring(normalize(sandbox))
     raw = sandbox.get('report',{}).get('network')
     if not isinstance(raw,dict) or not any(k in raw for k in ['dns','http','https','tcp','udp']): return None
     events=[]
@@ -22,8 +39,9 @@ def network(sandbox):
         for r in raw.get(proto,[]): events.append({'type':proto,'host':r.get('host'),'url':r.get('uri') or r.get('url'),'method':r.get('method'),'source':'sandbox'})
     for proto in ['tcp','udp']:
         for r in raw.get(proto,[]): events.append({'type':proto,'ip':r.get('dst'),'port':r.get('dport'),'source':'sandbox'})
-    return {'events':events,'domains':sorted({str(e.get('domain') or e.get('host')) for e in events if e.get('domain') or e.get('host')}),
-            'ips':sorted({str(e['ip']) for e in events if e.get('ip')}),'capture_scope':'Sandbox report metadata; encrypted request bodies are not available'}
+    return monitoring({'events':events,'domains':sorted({str(e.get('domain') or e.get('host')) for e in events if e.get('domain') or e.get('host')}),
+            'ips':sorted({str(e['ip']) for e in events if e.get('ip')}),'dns_available':isinstance(raw.get('dns'),list),
+            'capture_scope':'Sandbox report metadata; encrypted request bodies are not available'})
 
 def behavior(sandbox):
     if sandbox.get('source') == 'cuckoo3':
@@ -101,5 +119,10 @@ def verdict(results):
     trusted_clean=not settings.approval_require_reputation or stats.get('harmless',0)+stats.get('undetected',0)>=settings.approval_min_reputation_engines
     state='LIKELY_MALICIOUS' if score>=60 else 'SUSPICIOUS' if score>=20 else 'LIKELY_BENIGN' if coverage and trusted_clean else 'INCONCLUSIVE'
     gaps=[{'engine':k,'status':v['status'],'reason':v.get('reason')} for k,v in results.items() if k not in ['verdict','report'] and v['status']!='COMPLETED']
+    assessment=results.get('vulnerabilities',{}).get('data',{})
+    affected=[f for f in assessment.get('findings',[]) if f.get('classification')=='CONFIRMED_AFFECTED']
+    vulnerability_risk='CONFIRMED_AFFECTED' if affected else 'UNCERTAIN' if assessment.get('status')!='COMPLETED' or any(f.get('classification')!='NOT_AFFECTED' for f in assessment.get('findings',[])) else 'NO_MATCHING_AFFECTED_VERSIONS'
+    overall='MALWARE_FINDINGS' if score>=20 else 'KNOWN_VULNERABILITIES' if affected else 'INCOMPLETE_EVIDENCE' if gaps or vulnerability_risk=='UNCERTAIN' else 'LOW_OBSERVED_RISK'
     return {'security':state,'score':min(score,100),'confidence':'MEDIUM' if state!='INCONCLUSIVE' else 'LOW','reasons':reasons,'coverage_gaps':gaps,'approval_policy':criteria(),
+            'overall_risk':overall,'vulnerability_risk':vulnerability_risk,'confirmed_vulnerability_ids':[f['id'] for f in affected],
             'policy_version':'1.1','ai':results.get('ai',{}).get('data',{}),'explanation':'No adverse evidence is not proof of safety or absence of vulnerabilities. Incomplete required analysis cannot yield a likely-benign verdict. AI indicators never increase the security score.'}

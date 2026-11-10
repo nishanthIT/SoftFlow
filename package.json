@@ -1,0 +1,13 @@
+{
+  "name": "sentinelscan-workspace",
+  "private": true,
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "start": "bash start.sh",
+    "start:presentation": "bash start.sh --presentation",
+    "dev": "bash start.sh --dev --allow-degraded",
+    "service:install": ".venv-local/bin/python scripts/service.py install",
+    "status": ".venv-local/bin/python scripts/local.py status",
+    "stop": "bash stop.sh"
+  }
+}

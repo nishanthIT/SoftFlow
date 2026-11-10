@@ -1,3 +1,6 @@
 node_modules
 .next
 *.tsbuildinfo
+
+.next-dev
+.next-releases

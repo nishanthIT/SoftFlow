@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -53,9 +54,16 @@ def install(values):
         run(['git','-C',source,'fetch','origin',VERSIONS['vmcloak_revision']])
         run(['git','-C',source,'checkout','--detach',VERSIONS['vmcloak_revision']])
     if not (venv/'bin/python').exists():run([cuckoo_venv/'bin/python','-m','venv',venv])
-    run([venv/'bin/python','-m','pip','install','-r',ROOT/'sandbox/vmcloak-requirements.lock',source])
+    stamp=venv/'.sentinel-install.json'
+    expected={'revision':VERSIONS['vmcloak_revision'],'requirements':hashlib.sha256((ROOT/'sandbox/vmcloak-requirements.lock').read_bytes()).hexdigest()}
+    current=json.loads(stamp.read_text()) if stamp.exists() else {}
+    healthy=subprocess.run([str(venv/'bin/python'),'-m','pip','check'],capture_output=True).returncode==0
+    if current!=expected or not healthy:
+        run([venv/'bin/python','-m','pip','install','-r',ROOT/'sandbox/vmcloak-requirements.lock',source])
+    else:print('Pinned VMCloak installation unchanged; checking dependencies without reinstalling')
     run([venv/'bin/python','-m','pip','check'])
     repair(values)
+    stamp.write_text(json.dumps(expected))
 
 
 def repair(values):
@@ -174,6 +182,30 @@ def download(values):
     print('Windows media verified:',sha256,flush=True)
 
 
+def guest_state(values):
+    """Read committed VMCloak state; exit codes alone do not prove a build worked."""
+    _,cwd,_,_=guest_paths(values)
+    name=values.get('CUCKOO_BASE_VM') or 'sentinel-win10-base'
+    snapshot=values.get('CUCKOO_SNAPSHOT_VM') or 'sentinel-win10'
+    import re
+    if not all(re.fullmatch(r'[A-Za-z0-9_-]{1,64}',n) for n in (name,snapshot)):
+        raise RuntimeError('Guest names must contain only letters, numbers, underscores and hyphens')
+    image=None;registered=None
+    if (cwd/'repository.db').is_file():
+        with sqlite3.connect((cwd/'repository.db').as_uri()+'?mode=ro',uri=True) as db:
+            image=db.execute('SELECT path,adapter,ipaddr FROM image WHERE name=?',(name,)).fetchone()
+            registered=db.execute('SELECT ipaddr FROM snapshot WHERE vmname=?',(snapshot,)).fetchone()
+    folder=cwd/'vms/qemu'/snapshot
+    artifacts=[folder/'disk.qcow2',folder/'memory.snapshot',folder/'machineinfo.json']
+    complete=bool(registered) and all(p.is_file() and p.stat().st_size>0 for p in artifacts)
+    if complete:
+        info=json.loads(artifacts[-1].read_text())
+        complete=(info.get('machinery')=='qemu' and info.get('machine',{}).get('name')==snapshot
+                  and info['machine'].get('ip')==registered[0])
+    return {'image':image,'snapshot_complete':complete,'snapshot_partial':bool(registered) or any(p.exists() for p in artifacts),
+            'name':name,'snapshot':snapshot,'folder':folder}
+
+
 def build(values):
     import socket
     _,cwd,_,iso=guest_paths(values)
@@ -182,6 +214,18 @@ def build(values):
     if interface not in {n for _,n in socket.if_nameindex()} or not os.access(helper,os.X_OK):
         raise RuntimeError('Guest host setup is missing. Run sudo python3 scripts/prepare_cuckoo_host.py first.')
     if not os.access('/dev/kvm',os.R_OK|os.W_OK):raise RuntimeError('KVM access is required to build a guest')
+    existing=guest_state(values)
+    if existing['snapshot_complete']:
+        print('Completed guest snapshot found; reusing it without reinstalling Windows')
+        import_vms(values,cwd/'vms/qemu');return
+    if existing['snapshot_partial']:
+        raise RuntimeError('Incomplete guest snapshot preserved at '+str(existing['folder'])+'. Inspect VMCloak logs before removing or repairing that snapshot; setup will not overwrite it.')
+    if existing['image'] and not Path(existing['image'][0]).is_file():
+        raise RuntimeError('VMCloak base image is registered but its disk is missing; repair the image path before retrying')
+    if not existing['image'] and (cwd/'image'/(existing['name']+'.qcow2')).exists():
+        raise RuntimeError('Unregistered partial base disk found; inspect VMCloak logs and repair it before retrying. The disk was preserved.')
+    required=(int(values.get('CUCKOO_RAM_MB') or '4096')*1024**2+20*1024**3)
+    if shutil.disk_usage(cwd).free<required:raise RuntimeError('Guest build needs at least 20 GiB plus guest RAM size of free working disk space; existing data was preserved')
     if not iso.is_file() or checksum(iso)[0]!=VERSIONS['windows_iso_sha1']:raise RuntimeError('Download and verify the supported Windows ISO first')
     mount=path(values,'CUCKOO_ISO_MOUNT','.local/media/windows')
     if not (mount/'sources/install.wim').exists() and not (mount/'sources/install.esd').exists():
@@ -194,15 +238,21 @@ def build(values):
     gateway=values.get('CUCKOO_RESULTSERVER_IP') or '192.168.30.1'
     name=values.get('CUCKOO_BASE_VM') or 'sentinel-win10-base'
     snapshot=values.get('CUCKOO_SNAPSHOT_VM') or 'sentinel-win10'
-    vmcloak(values,'init','--win10x64','--hddsize',values.get('CUCKOO_DISK_GB') or '64',
+    if not existing['image']:
+        vmcloak(values,'init','--win10x64','--hddsize',values.get('CUCKOO_DISK_GB') or '64',
             '--cpus',values.get('CUCKOO_CPUS') or '2','--ramsize',values.get('CUCKOO_RAM_MB') or '4096',
             '--network',network,'--gateway',gateway,'--dns',gateway,'--dns2',gateway,
             '--vm','qemu','--ip',values.get('CUCKOO_BUILD_IP') or '192.168.30.2',
-            '--iso-mount',str(mount),name,interface)
+                '--iso-mount',str(mount),name,interface)
+        if not guest_state(values)['image']:raise RuntimeError('VMCloak exited without committing a base image; inspect guest-build.log')
+    else:
+        if existing['image'][1]!=interface:raise RuntimeError('Existing base image uses a different bridge; its network must be repaired before reuse')
+        print('Completed Windows base image found; resuming snapshot preparation')
     # Minimal executable-analysis guest. Snapshot automatically installs the
     # supported Threemon patch and finalizes Windows. Office/browser suites
     # are optional and not required by this application's EXE-only workflow.
     vmcloak(values,'snapshot','--count','1',name,snapshot,values.get('CUCKOO_GUEST_IP') or '192.168.30.10')
+    if not guest_state(values)['snapshot_complete']:raise RuntimeError('VMCloak did not produce a complete registered snapshot; inspect guest-build.log')
     import_vms({**values,'CUCKOO_INTERFACE':interface,'CUCKOO_RESULTSERVER_IP':gateway},cwd/'vms/qemu')
 
 

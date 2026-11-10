@@ -1,4 +1,4 @@
-import asyncio,hashlib,json,struct
+import asyncio,hashlib,json,struct,errno,re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI,UploadFile,File,Form,HTTPException,Response,Request
@@ -12,24 +12,34 @@ from .config import settings
 from .models import Session,User,Sample,Job,Engine,Audit,ENGINES,TERMINAL,engine
 from . import policy
 from .models import record_models
-from . import storage
+from . import storage, uploads, sample_io
 from .provider_status import sanitize, check as check_provider
 from .reporting import build_report, outcome
 from .approval import recommend, criteria
+from .lifecycle import storage_guard
+from .retention import expiration
 from typing import Literal
+from .software_identity import SoftwareIdentity
 
 @asynccontextmanager
 async def lifespan(app):
     if settings.mock_analysis: raise RuntimeError('Mock analysis is not supported in production')
     with Session.begin() as db:
-        # Retain historical user foreign keys; new actions share an unauthenticated actor.
+        # Preserve historical users; new records belong to the shared LAN workspace.
         if not db.scalar(select(User).where(User.username=='LAN workspace')):
             db.add(User(username='LAN workspace',role='workspace'))
     yield
 app=FastAPI(title='SentinelScan API',version='1.1.0',lifespan=lifespan,docs_url='/api/docs',openapi_url='/api/openapi.json')
+from .ssl_checks import router as ssl_router
+app.include_router(ssl_router)
 
 @app.middleware('http')
 async def security(request,call_next):
+    length=request.headers.get('content-length','')
+    if request.url.path=='/api/ssl-checks' and length.isdigit() and int(length)>300*1024:
+        return Response('Domain list exceeds 256 KiB',status_code=413)
+    if request.url.path=='/api/samples' and length.isdigit() and int(length)>(settings.max_upload_mb+1)*1024*1024:
+        return Response('Upload exceeds the configured file limit',status_code=413)
     if request.method in ['POST','PUT','PATCH','DELETE']:
         origin=request.headers.get('origin')
         allowed=[str(request.base_url).rstrip('/'), *settings.allowed_origins]
@@ -45,49 +55,91 @@ async def security(request,call_next):
     response=await call_next(request)
     response.headers['X-Content-Type-Options']='nosniff'
     response.headers['Cache-Control']='no-store'
+    response.headers['X-Frame-Options']='DENY'
+    response.headers['Referrer-Policy']='same-origin'
     return response
-def serialize(row): return {c.name:getattr(row,c.name) for c in row.__table__.columns}
-def new_job(db,sample_id,consent,filename=None):
+def serialize(row):
+    data={c.name:getattr(row,c.name) for c in row.__table__.columns}
+    if isinstance(row, Job): data.update(expiration(row))
+    return data
+def new_job(db,sample_id,consent,filename=None,software_identity=None):
     actor=db.scalar(select(User.id).where(User.username=='LAN workspace'))
-    job=Job(sample_id=sample_id,user_id=actor,consent=consent,submitted_filename=filename); db.add(job); db.flush()
+    job=Job(sample_id=sample_id,user_id=actor,consent=consent,submitted_filename=filename,software_identity=software_identity or {}); db.add(job); db.flush()
     for name in ENGINES: db.add(Engine(analysis_id=job.id,name=name))
     db.add(Audit(user_id=job.user_id,action='analysis.created',data={'analysis_id':job.id,'sample_id':sample_id,'external_consent':consent}))
     return job.id
 @app.post('/api/samples',status_code=201)
-async def upload(file:UploadFile=File(...),external_consent:bool=Form(False)):
-    filename=Path((file.filename or '').replace('\\','/')).name[:255]
-    if not filename.lower().endswith('.exe'): raise HTTPException(422,'Only .exe files are accepted')
+async def upload(file:UploadFile=File(...),external_consent:bool=Form(False),
+                 software_name:str=Form('',max_length=160),software_version:str=Form('',max_length=128)):
+    filename=uploads.name(file.filename or '')
+    identity=None
+    if software_name.strip() or software_version.strip():
+        try:identity=SoftwareIdentity(name=software_name,version=software_version).model_dump()
+        except ValueError:raise HTTPException(422,'Provide both a valid software name and version')
+    # Starlette spools multipart files; copy in bounded chunks into an unlinked
+    # scratch file. The browser uses the resumable endpoints below.
+    try:
+        with storage.scratch() as (out,path):
+            size=0
+            while chunk:=await file.read(1024*1024):
+                size+=len(chunk)
+                if size>settings.max_upload_mb*1024*1024:raise HTTPException(413,'File exceeds upload limit')
+                storage.require_space(len(chunk));out.write(chunk)
+            out.flush()
+            def persist():
+                with Session.begin() as db:
+                    storage_guard(db,shared=True)
+                    try:return uploads.persist(db,path,filename,external_consent,identity)
+                    except ValueError as error:raise HTTPException(422,str(error))
+            return await asyncio.to_thread(persist)
+    except OSError as error:
+        if error.errno in (errno.ENOSPC,errno.EDQUOT):raise HTTPException(507,'Insufficient storage for upload')
+        raise
+
+class UploadStart(BaseModel):
+    filename:str=Field(max_length=1024)
+    size:int=Field(ge=64,le=2147483648)
+    external_consent:bool=False
+    software_identity:SoftwareIdentity|None=None
+
+@app.post('/api/uploads',status_code=201)
+def create_upload(body:UploadStart):
+    return uploads.create(Session,body.filename,body.size,body.external_consent,body.software_identity.model_dump() if body.software_identity else None)
+
+@app.get('/api/uploads/{identifier}')
+def upload_status(identifier:str):return uploads.get(Session,identifier)
+
+@app.put('/api/uploads/{identifier}/chunks/{offset}')
+async def upload_chunk(identifier:str,offset:int,request:Request):
+    if offset<0:raise HTTPException(422,'Invalid chunk offset')
+    length=request.headers.get('content-length','')
+    if length.isdigit() and int(length)>settings.upload_chunk_bytes:raise HTTPException(413,'Chunk exceeds upload limit')
+    await asyncio.to_thread(uploads.get,Session,identifier,True)
     data=bytearray()
-    while chunk:=await file.read(1024*1024):
-        data.extend(chunk)
-        if len(data)>settings.max_upload_mb*1024*1024: raise HTTPException(413,'File exceeds upload limit')
-    if len(data)<64 or data[:2]!=b'MZ': raise HTTPException(422,'Invalid DOS header')
-    offset=struct.unpack_from('<I',data,60)[0]
-    if offset+24>len(data) or data[offset:offset+4]!=b'PE\0\0': raise HTTPException(422,'Invalid PE header')
-    if not struct.unpack_from('<H',data,offset+22)[0]&2: raise HTTPException(422,'PE is not executable')
-    if struct.unpack_from('<H',data,offset+22)[0]&0x2000: raise HTTPException(422,'DLL submissions are unsupported; submit a Windows EXE')
-    if struct.unpack_from('<H',data,offset+4)[0] not in (0x14c,0x8664): raise HTTPException(422,'Unsupported executable architecture; the configured Windows workflow accepts x86 and x64 EXE files')
-    hashes={k:hashlib.new(k,data).hexdigest() for k in ['sha256','sha1','md5']}
-    def persist():
-        storage.put('samples/'+hashes['sha256'],bytes(data))
-        with Session() as db:
-            sample=db.scalar(select(Sample).where(Sample.sha256==hashes['sha256'])); duplicate=bool(sample)
-            if not sample:
-                sample=Sample(**hashes,filename=filename,size=len(data)); db.add(sample)
-                try: db.commit()
-                except IntegrityError:
-                    db.rollback(); sample=db.scalar(select(Sample).where(Sample.sha256==hashes['sha256'])); duplicate=True
-            id=new_job(db,sample.id,external_consent,filename); db.commit()
-            return {'analysis_id':id,'sample_id':sample.id,'duplicate':duplicate,**hashes}
-    return await asyncio.to_thread(persist)
+    try:
+        async with asyncio.timeout(120):
+            async for part in request.stream():
+                data.extend(part)
+                if len(data)>settings.upload_chunk_bytes:raise HTTPException(413,'Chunk exceeds upload limit')
+    except TimeoutError:raise HTTPException(408,'Chunk upload timed out; retry this chunk')
+    return await asyncio.to_thread(uploads.chunk,Session,identifier,offset,bytes(data),request.headers.get('x-chunk-sha256',''))
+
+@app.post('/api/uploads/{identifier}/complete',status_code=201)
+def complete_upload(identifier:str):return uploads.complete(Session,identifier)
+
+@app.delete('/api/uploads/{identifier}',status_code=204)
+def cancel_upload(identifier:str):uploads.abandon(Session,identifier)
+
 class Start(BaseModel):
     sample_id:str
     external_consent:bool=False
+    software_identity:SoftwareIdentity|None=None
 @app.post('/api/analysis',status_code=201)
 def start(body:Start):
     with Session.begin() as db:
+        storage_guard(db, shared=True)
         if not db.get(Sample,body.sample_id): raise HTTPException(404,'Sample not found')
-        return {'analysis_id':new_job(db,body.sample_id,body.external_consent)}
+        return {'analysis_id':new_job(db,body.sample_id,body.external_consent,software_identity=body.software_identity.model_dump() if body.software_identity else None)}
 @app.get('/api/samples')
 def samples(limit:int=50,offset:int=0):
     with Session() as db:
@@ -96,7 +148,7 @@ def samples(limit:int=50,offset:int=0):
         for s in rows:
             j=db.scalar(select(Job).where(Job.sample_id==s.id).order_by(Job.created_at.desc()))
             v=db.scalar(select(Engine).where(Engine.analysis_id==j.id,Engine.name=='verdict')) if j else None
-            result.append({**serialize(s),'latest_analysis_id':j.id if j else None,'status':j.status if j else None,'verdict':v.data.get('security') if v else None})
+            result.append({**serialize(s),**(expiration(j) if j else {}),'latest_analysis_id':j.id if j else None,'status':j.status if j else None,'verdict':v.data.get('security') if v else None})
         return result
 @app.get('/api/samples/{id}')
 def sample(id:str):
@@ -114,7 +166,7 @@ def analysis_data(id):
         sample['filename']=j.submitted_filename or sample['filename']
         reviews=record_models['analyst_reviews']
         decisions=[serialize(r) for r in db.scalars(select(reviews).where(reviews.analysis_id==id).order_by(reviews.created_at.desc(),reviews.id.desc()))]
-        return sanitize({**serialize(j),'approval':recommend(j.status,engines),'decisions':decisions,'final_status':outcome(j.status,engines),'sample':sample,'engines':engines,'progress':round(100*sum(e['status'] in TERMINAL for e in engines)/len(ENGINES))})
+        return sanitize({**serialize(j),'approval':recommend(j.status,engines),'decisions':decisions,'final_status':outcome(j.status,engines),'sample':sample,'engines':engines,'progress':round(100*sum(e['status'] in TERMINAL for e in engines)/max(1,len(engines)))})
 @app.get('/api/analysis/{id}')
 @app.get('/api/analysis/{id}/status')
 def analysis(id:str): return analysis_data(id)
@@ -132,6 +184,32 @@ def report(id:str,response:Response):
     else: exported=build_report(result,result['sample'],result['engines'])
     response.headers['Content-Disposition']='attachment; filename="sentinelscan-'+result['id']+'.json"'
     return sanitize(exported)
+
+@app.get('/api/analysis/{id}/report.pdf')
+def pdf_report(id:str):
+    from .pdf_report import render
+    # Render the export snapshot with current decision history. The original
+    # PDF is also persisted at completion and removed by retention.
+    exported=report(id,Response())
+    return Response(render(exported),media_type='application/pdf',headers={
+        'Content-Disposition':'attachment; filename="sentinelscan-'+exported['analysis_id']+'.pdf"'})
+
+@app.get('/api/analysis/{id}/artifacts/{task_id}/{filename}')
+def artifact(id:str,task_id:str,filename:str):
+    if not re.fullmatch(r'\d{8}-[A-Z0-9]{6}_\d+',task_id) or not re.fullmatch(r'capture\.pcap|[0-9]{1,14}\.(?:jpg|png)',filename):
+        raise HTTPException(404,'Artifact not found')
+    result=engine_result(id,'sandbox')
+    key=f'artifacts/{id}/{task_id}/{filename}'
+    entry=next((f for f in result['data'].get('artifacts',{}).get('files',[]) if f.get('object_key')==key),None)
+    if not entry:raise HTTPException(404,'Artifact not found')
+    def stream():
+        with Session.begin() as db:
+            storage_guard(db,shared=True)
+            if not db.get(Job,id):return
+            with storage.materialize(key) as path,open(path,'rb') as source:
+                while chunk:=source.read(1024*1024):yield chunk
+    return StreamingResponse(stream(),media_type='application/octet-stream',headers={
+        'Content-Disposition':'attachment; filename="'+filename+'"','Content-Length':str(entry['size'])})
 
 class Decision(BaseModel):
     decision: Literal['APPROVE','REJECT','REVIEW_REQUIRED']
@@ -175,7 +253,7 @@ def engine_result(id:str,engine_name:str):
     return result
 @app.get('/api/settings')
 def config():
-    return {'authentication_required':False,'approval_policy':criteria(),'providers':[{'name':'VirusTotal','configured':bool(settings.virustotal_api_key)},{'name':'Hybrid Analysis','configured':bool(settings.hybrid_analysis_api_key)},{'name':'CAPE / Cuckoo','configured':bool(settings.cuckoo_api_url),'isolation_confirmed':settings.sandbox_isolation_confirmed}], 'external_uploads_enabled':settings.external_uploads_enabled,'max_upload_mb':settings.max_upload_mb,'secrets':'Managed through server environment; never returned to the browser'}
+    return {'presentation_mode':settings.presentation_mode,'authentication_required':False,'sandbox_enabled':settings.sandbox_enabled,'runtime':settings.app_env,'approval_policy':criteria(),'providers':[{'name':'VirusTotal','configured':bool(settings.virustotal_api_key)},{'name':'Hybrid Analysis','configured':bool(settings.hybrid_analysis_api_key)},{'name':'CAPE / Cuckoo','configured':bool(settings.cuckoo_api_url),'isolation_confirmed':settings.sandbox_isolation_confirmed}], 'external_uploads_enabled':settings.external_uploads_enabled,'max_upload_mb':settings.max_upload_mb,'secrets':'Managed through server environment; never returned to the browser'}
 @app.get('/api/rules')
 def rules():
     paths=list(Path(settings.yara_path).glob('**/*.yar*'))

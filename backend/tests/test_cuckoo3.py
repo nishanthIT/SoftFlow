@@ -163,3 +163,30 @@ def test_health_checks_windows_version_and_cache_attestation(monkeypatch, sandbo
     assert check('sandbox', refresh=True)['execution_ready']
     monkeypatch.setattr(settings, 'sandbox_isolation_confirmed', False)
     assert not check('sandbox')['execution_ready']
+
+
+def test_dns_responses_and_blocked_policy_are_preserved(monkeypatch,sandbox):
+    monkeypatch.setattr(settings,'sandbox_network_policy','blocked')
+    post=sandbox[f'/analysis/{ANALYSIS}/task/{TASK}/post']
+    post['network']['dns']['response']=[{'ts':11,'type':'A','data':'192.0.2.9','srcip':'192.0.2.53','srcport':53,'dstip':'192.0.2.2','dstport':12345}]
+    transport(monkeypatch,sandbox)
+    result=providers.Cuckoo3Provider().run(DATA,lambda _:None)
+    dns=policy.dns(policy.network(result))
+    assert dns['queries'][0]['domain']=='test.example'
+    assert dns['responses'][0]['answer']=='192.0.2.9'
+    assert 'domain' not in dns['responses'][0] # Source did not associate the answer with a name.
+    assert dns['network_policy']=='blocked' and dns['monitoring_status']=='OPERATIONAL'
+    result['report']['tasks'][0]['post']['network']={'dns':{'query':[],'response':[]},'tcp':[]}
+    dns=policy.dns(policy.network(result))
+    assert dns['traffic_status']=='NO_DNS_OBSERVED'
+
+
+def test_process_lifetimes_build_tree_and_termination_events():
+    from app.cuckoo3_results import behavior,process_tree
+    processes=[{'procid':1,'pid':100,'name':'parent.exe','parent_procid':None},
+               {'procid':2,'pid':101,'name':'child.exe','parent_procid':1,'end_ts':500}]
+    result=behavior({'report':{'tasks':[{'task':{'id':TASK,'state':'reported'},'post':{'processes':processes}}]}})
+    assert result['process_tree'][0]['children'][0]['procid']==2
+    assert any(e['category']=='process_termination' and e['timestamp']==500 for e in result['events'])
+    cyclic=[{'procid':1,'parent_procid':2},{'procid':2,'parent_procid':1}]
+    assert len(json.dumps(process_tree(cyclic)))<500

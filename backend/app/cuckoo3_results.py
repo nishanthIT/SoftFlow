@@ -2,6 +2,21 @@
 from urllib.parse import urlsplit
 
 
+def process_tree(processes):
+    # procid identifies a process lifetime, unlike Windows PIDs which can recur.
+    nodes = {p['procid']: {**p, 'children': []} for p in processes if p.get('procid') is not None}
+    roots = []
+    for identifier, node in nodes.items():
+        parent = node.get('parent_procid'); visited = {identifier}; cursor = parent
+        while cursor in nodes and cursor not in visited:
+            visited.add(cursor); cursor = nodes[cursor].get('parent_procid')
+        if parent in nodes and cursor not in visited:
+            nodes[parent]['children'].append(node)
+        else: roots.append(node)
+    roots.extend({**p, 'children': []} for p in processes if p.get('procid') is None)
+    return roots
+
+
 def posts(sandbox):
     return [(item['task']['id'], item['post']) for item in sandbox.get('report', {}).get('tasks', [])
             if item.get('task', {}).get('state') == 'reported' and isinstance(item.get('post'), dict)]
@@ -11,7 +26,7 @@ def behavior(sandbox):
     results = posts(sandbox)
     if not results or any(not isinstance(post.get('processes'), list) or not post['processes'] for _, post in results):
         return None
-    processes, events, signatures, screenshots = [], [], [], []
+    processes, events, signatures, screenshots, trees, warnings = [], [], [], [], [], []
     for task_id, post in results:
         for process in post['processes']:
             processes.append({**process, 'task_id': task_id, 'process_name': process.get('name')})
@@ -20,6 +35,12 @@ def behavior(sandbox):
                            'timestamp_unit': 'milliseconds_since_monitor_start', 'technique': None,
                            'evidence': {'pid': process.get('pid'), 'image': process.get('image'),
                                         'commandline': process.get('commandline')}})
+            if process.get('end_ts') is not None:
+                events.append({'category':'process_termination','severity':'low','source':'cuckoo3','task_id':task_id,
+                               'process':process.get('name'),'timestamp':process['end_ts'],'timestamp_unit':'milliseconds_since_monitor_start',
+                               'technique':None,'evidence':{'pid':process.get('pid'),'procid':process.get('procid')}})
+        trees.extend(process_tree([p for p in processes if p['task_id']==task_id]))
+        warnings.extend({'task_id':task_id,'message':message} for message in post.get('errors',{}).get('nonfatal',[]))
         for signature in post.get('signatures', []):
             signatures.append({**signature, 'task_id': task_id})
             score = signature.get('score', 0)
@@ -27,7 +48,7 @@ def behavior(sandbox):
                            'source': 'cuckoo3', 'task_id': task_id, 'timestamp': None, 'process': None,
                            'technique': None, 'techniques': signature.get('ttps', []), 'evidence': signature})
         screenshots.extend({**item, 'task_id': task_id} for item in post.get('screenshot', []))
-    return {'events': events[:10000], 'processes': processes, 'process_tree': [], 'summary': {},
+    return {'events': events[:10000], 'processes': processes, 'process_tree': trees, 'summary': {},'warnings':warnings,
             'signatures': signatures, 'screenshots': screenshots, 'dropped_files': [],
             'limitations': 'Cuckoo 3 post reports provide process metadata and signatures. Raw API calls and dropped-file binaries are not exposed by this adapter.'}
 
@@ -42,7 +63,12 @@ def network(sandbox):
         raw = post['network']
         for query in raw.get('dns', {}).get('query', []):
             events.append({'type': 'dns', 'domain': query.get('name'), 'query_type': query.get('type'),
+                           'direction':'query','source_ip':query.get('srcip'),'source_port':query.get('srcport'),'ip':query.get('dstip'),'port':query.get('dstport'),
                            'timestamp': query.get('ts'), 'task_id': task_id, 'source': 'cuckoo3'})
+        for answer in raw.get('dns', {}).get('response', []):
+            events.append({'type':'dns_response','answer_type':answer.get('type'),'answer':answer.get('data'),'fields':answer.get('fields'),
+                           'direction':'response','source_ip':answer.get('srcip'),'source_port':answer.get('srcport'),'ip':answer.get('dstip'),'port':answer.get('dstport'),
+                           'timestamp':answer.get('ts'),'task_id':task_id,'source':'cuckoo3'})
         for proto in ('http', 'https'):
             for item in raw.get(proto, []):
                 request = item.get('request', {})
@@ -51,14 +77,18 @@ def network(sandbox):
                 except ValueError: hostname = None
                 events.append({'type': request.get('protocol', proto), 'host': hostname, 'url': url,
                                'method': request.get('method'), 'ip': item.get('dstip'), 'port': item.get('dstport'),
+                               'source_ip':item.get('srcip'),'source_port':item.get('srcport'),
                                'timestamp': item.get('ts'), 'task_id': task_id, 'source': 'cuckoo3'})
         for proto in ('tcp', 'udp'):
             for item in raw.get(proto, []):
                 events.append({'type': proto, 'ip': item.get('dstip'), 'port': item.get('dstport'),
+                               'source_ip':item.get('srcip'),'source_port':item.get('srcport'),
                                'timestamp': item.get('ts'), 'task_id': task_id, 'source': 'cuckoo3'})
         domains.update(str(x) for x in raw.get('domain', []))
         ips.update(str(x) for x in raw.get('host', []))
     domains.update(str(e.get('domain') or e.get('host')) for e in events if e.get('domain') or e.get('host'))
     ips.update(str(e['ip']) for e in events if e.get('ip'))
     return {'events': events[:10000], 'domains': sorted(domains), 'ips': sorted(ips),
+            'events_truncated':len(events)>10000,'dns_available':all(isinstance(p['network'].get('dns'),dict) for _,p in results),
+            'artifacts':sandbox.get('artifacts',{}),
             'capture_scope': 'Cuckoo 3 processed packet metadata. Events may include background guest traffic; absent traffic does not prove safety.'}

@@ -6,6 +6,7 @@ import io
 import hashlib
 import re
 from .provider_status import diagnostic
+from . import sample_io
 from abc import ABC, abstractmethod
 import httpx
 from .config import settings as cfg
@@ -42,8 +43,9 @@ def virustotal(data, sha256, consent, checkpoint=lambda d: None):
         if response.status_code == 404:
             if not (consent and cfg.external_uploads_enabled): raise Unavailable('Hash not found; external upload not permitted')
             target = '/files'
-            if len(data)>32*1024*1024: target = checked(c.get('/files/upload_url'))['data']
-            raw['submission']=checked(c.post(target,files={'file':('sample.exe',data,'application/octet-stream')}))
+            if sample_io.length(data)>32*1024*1024: target = checked(c.get('/files/upload_url'))['data']
+            if sample_io.length(data)>cfg.external_provider_max_upload_mb*1024*1024:raise Unavailable('File exceeds the configured external-provider upload limit; hash lookup was performed')
+            raw['submission']=checked(sample_io.post(c,target,data))
             task = raw['submission']['data']['id']
             save('Submitted to VirusTotal; awaiting analysis')
             def state():
@@ -100,7 +102,8 @@ def hybrid(data, sha256, consent, checkpoint=lambda d: None):
         else:
             if not (consent and cfg.external_uploads_enabled):
                 raise Unavailable('No existing Hybrid Analysis report for this hash. File submission requires administrator enablement and consent on a new analysis.')
-            submitted = checked(c.post('/submit/file',data={'environment_id':str(cfg.hybrid_environment_id)},files={'file':('sample.exe',data)}))
+            if sample_io.length(data)>cfg.external_provider_max_upload_mb*1024*1024:raise Unavailable('File exceeds the configured external-provider upload limit; hash lookup was performed')
+            submitted = checked(sample_io.post(c,'/submit/file',data,data={'environment_id':str(cfg.hybrid_environment_id)}))
             raw['submission']=submitted;save('Submitted to Hybrid Analysis; awaiting execution')
             task = submitted.get('job_id') or submitted.get('id')
             if not task: raise ProviderFailure('Hybrid Analysis submission returned no task identifier')
@@ -144,7 +147,7 @@ class CuckooCapeProvider(SandboxProvider):
         self.cape = cfg.sandbox_kind == 'cape'
         self.client = httpx.Client(base_url=cfg.cuckoo_api_url.rstrip('/')+'/',headers={'Authorization':('Token ' if self.cape else 'Bearer ')+cfg.cuckoo_api_token},timeout=cfg.request_timeout)
     def submit(self, data):
-        r = checked(self.client.post('tasks/create/file/' if self.cape else 'tasks/create/file', files={'file':('sample.exe',data)},data={'timeout':'300','enforce_timeout':'1'}))
+        r = checked(sample_io.post(self.client,'tasks/create/file/' if self.cape else 'tasks/create/file',data,data={'timeout':'300','enforce_timeout':'1'}))
         if r.get('error'): raise RuntimeError('Sandbox rejected submission')
         return r['data']['task_ids'][0] if self.cape else r['task_id']
     def get_status(self, task_id):
@@ -156,6 +159,7 @@ class CuckooCapeProvider(SandboxProvider):
         return r.get('data',r)
     def run(self, data, checkpoint, previous=None):
         try:
+            if not previous: checkpoint({'provider':cfg.sandbox_kind,'phase':'submission_pending'})
             task = previous or self.submit(data)
             checkpoint({'task_id':task,'provider':cfg.sandbox_kind,'phase':'submitted'})
             def finished(status):
@@ -205,7 +209,7 @@ class Cuckoo3Provider(SandboxProvider):
         platforms=self.read('submit/platforms')
         if not windows_available(platforms):raise Unavailable('Cuckoo has no matching Windows '+cfg.sandbox_os_version+' analysis VM')
         self.save(phase='submission_pending')
-        r=self.client.post('submit/file',files={'file':(self.filename,data,'application/octet-stream')},data={'settings':json.dumps({
+        r=sample_io.post(self.client,'submit/file',data,filename=self.filename,data={'settings':json.dumps({
             'timeout':cfg.sandbox_analysis_timeout,'enforce_timeout':True,
             'platforms':[{'platform':cfg.sandbox_platform,'os_version':cfg.sandbox_os_version}]})})
         # A 503 can contain a *persisted* analysis. Keep its id before reporting
@@ -250,7 +254,7 @@ class Cuckoo3Provider(SandboxProvider):
             self.save(report=result)
         if not result['tasks']:raise ProviderFailure('Cuckoo analysis finished without any task reports')
         return result
-    def run(self,data,checkpoint,previous=None,filename='sample.exe'):
+    def run(self,data,checkpoint,previous=None,filename='sample.exe',collect_artifacts=None):
         try:
             self.checkpoint=checkpoint
             self.filename=filename
@@ -273,13 +277,19 @@ class Cuckoo3Provider(SandboxProvider):
                 time.sleep(min(cfg.provider_poll_interval,max(0,self.deadline-time.monotonic())))
             else:raise ProviderTimeout('Cuckoo analysis deadline exceeded')
             report=self.get_report(task)
-            if report['analysis'].get('submitted',{}).get('sha256','').lower()!=hashlib.sha256(data).hexdigest():
+            if report['analysis'].get('submitted',{}).get('sha256','').lower()!=sample_io.hashes(data)['sha256']:
                 raise ProviderFailure('Cuckoo report hash does not match the submitted file')
             if report['analysis'].get('errors',{}).get('fatal'):
                 raise ProviderFailure('Cuckoo analysis contains fatal errors')
+            if collect_artifacts:
+                self.save(artifacts=collect_artifacts(self.client,task,report))
             return {**self.saved,'task_id':task,'phase':'reported','source':'cuckoo3','report':report,
                 'snapshot_restoration':'Managed by Cuckoo machinery; not independently verified by this API'}
         finally:self.client.close()
 
 def sandbox_provider():
+    if not cfg.sandbox_enabled:
+        raise Unavailable('Sandbox execution is disabled by configuration. This report includes the available static and reputation evidence.')
+    if cfg.presentation_mode:
+        raise Unavailable('Sandbox execution is disabled in presentation mode. Static analysis and available reputation checks are included in this report.')
     return Cuckoo3Provider() if cfg.sandbox_kind=='cuckoo3' else CuckooCapeProvider()

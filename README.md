@@ -1,6 +1,50 @@
 # SentinelScan — setup and operation
 
-Analyze Windows EXE files with static inspection, YARA, reputation providers, and an isolated Cuckoo guest. Review the evidence, record an approval decision, and download the report. **Application login is not required.** Everyone who can reach the frontend can access the workspace and record decisions.
+Analyze Windows EXE files with static inspection, YARA, reputation providers, and an isolated Cuckoo guest. Review the evidence, record an approval decision, and download the report. The private LAN workspace opens directly without a login. Static analysis and reports work independently of Cuckoo.
+
+## Start the private LAN application
+
+```bash
+cd ~/Luna
+npm start
+```
+
+Open **http://localhost:3100**. No username or password is required. The website uses plain HTTP on your private LAN; no website certificates or HTTPS proxy are installed.
+
+This command prepares the application Python environment and locked frontend dependencies as needed, applies database migrations, and starts the website, workers and cleanup scheduler. With the current `SANDBOX_ENABLED=false` setting it does **not** install, build or start Cuckoo or a Windows VM, and does not require sandbox readiness. The existing local PostgreSQL and Redis host packages must be installed. No sudo is needed on the prepared host.
+
+Choose **SSL expiry checker** in the sidebar or open `http://localhost:3100/ssl-checker`. Upload a UTF-8 `.txt` file with one public domain per line (up to 500 unique domains, 256 KiB), watch progress and select **Download Excel**. The original script's nine report columns, status colors, filters and frozen header are preserved; a summary sheet is included. Expired/untrusted certificates and connection failures retain their details. Try [the example domain list](docs/ssl-domains-example.txt). Uploaded text is discarded after parsing, results expire after seven days, and Excel exports are generated in memory. This feature uses DNS/TLS connections independently of Cuckoo and website HTTPS.
+
+On **New analysis**, the **Software vulnerability lookup** fields let you supply a software name and version, such as `7-Zip` and `16.00`. Leave them empty to read executable version resources automatically. Missing product strings can also yield an explicitly unverified filename candidate. NVD's product dictionary resolves exact product names outside the local catalog; ambiguous publishers remain candidates. The analysis compares published affected-version ranges and displays applicable CVEs, severity, references and provider errors in **Software vulnerability assessment**, the JSON export and the PDF report. A supplied identity describes what to compare; it does not authenticate the uploaded binary. Existing completed analyses have **Check or correct software name and version**, which starts a new analysis while retaining the previous report.
+
+Executable upload, static analysis, YARA, configured reputation services, review history and PDF/JSON reports remain available. Reports explicitly label sandbox, behavior and network evidence as unavailable while the sandbox is disabled. Provider failures do not prevent the remaining analysis steps or report generation. No successful sandbox execution is simulated.
+
+`npm start` uses a cached production frontend build, with separate analysis, SSL and maintenance workers. A supervisor restarts crashed services automatically and limits managed log growth. Repeating startup reuses unchanged processes. Changes to backend code or runtime configuration drain workers before restarting them. Stop with `npm stop`; check services with `npm run status`. Use `npm run dev` only for development.
+
+For automatic startup when your user session starts:
+
+```bash
+npm run service:install
+```
+
+The user service also recovers the supervisor after a crash and uses the Node installation selected when it was installed. Rerun `npm run service:install` if you change Node installations. To keep it running after logout and start it before login, run `sudo loginctl enable-linger "$USER"` once in your terminal. Without that host setting, automatic startup is tied to your user session. Check it with `systemctl --user status sentinelscan`. Stop automatic operation with `systemctl --user disable --now sentinelscan`.
+
+Cuckoo can be enabled later with `SANDBOX_ENABLED=true` after provisioning and verification. The application never treats missing execution evidence as a clean sandbox result.
+
+## Optional automated Cuckoo setup
+
+From the repository root, as the normal application user:
+
+```bash
+npm run setup -- --accept-windows-license
+npm start
+```
+
+The license flag confirms authorization to install Windows from the configured ISO. Setup asks for sudo authentication in your terminal, installs only missing host packages, reuses pinned environments and verified media, configures the isolated bridge and boot service, builds or reuses the Windows guest, and verifies restoration with a harmless marker across two boots. It enables execution only after host isolation and snapshot checks pass, then runs a harmless end-to-end analysis. Existing partial VM builds are preserved and reported for repair. Setup stops an idle managed application; queued/running analyses prevent provisioning.
+
+`npm start` prepares missing or changed application dependencies, applies migrations and checks the application services. It attempts Cuckoo startup only when `SANDBOX_ENABLED=true`. In that configuration, `CUCKOO_REQUIRED=true` makes unavailable execution fail startup; `--allow-degraded` allows partial operation. It does not rebuild guests. Use `npm stop` to stop managed processes, and `npm run setup -- --check` for a read-only sandbox prerequisite report.
+
+Current verification and remaining host blockers are recorded in [implementation verification](docs/IMPLEMENTATION_VERIFICATION.md). The detailed manual paths below remain available for troubleshooting and remote sandbox deployments.
 
 ## Choose your setup path
 
@@ -15,36 +59,7 @@ Use one application runtime mode at a time. Local and Docker modes use different
 
 ## Finish the existing installation
 
-Run commands from the repository root:
-
-```bash
-cd /home/n1sh/Luna
-```
-
-The last verification on **22 October 2026** confirmed application/LAN operation, installed Cuckoo packages, KVM, and the downloaded Windows media. The isolated host bridge/capture permissions and Windows guest/snapshot were still missing. See [verification details](docs/LOCAL_STATUS.md); run the checks below to determine the current state.
-
-To load the latest application changes:
-
-```bash
-./stop.sh
-./start
-```
-
-To finish the missing Cuckoo infrastructure, stop application services first, then follow **steps 4–7** below. The essential host setup sequence is:
-
-```bash
-./stop.sh
-.venv-local/bin/python scripts/cuckoo_guest.py host-plan
-sudo python3 scripts/prepare_cuckoo_host.py --install-service
-.venv-local/bin/python scripts/cuckoo_local.py host-config
-.venv-local/bin/python scripts/cuckoo_guest.py repair
-.venv-local/bin/python scripts/cuckoo_guest.py download
-.venv-local/bin/python scripts/cuckoo_guest.py build
-```
-
-`download` verifies and reuses matching media. Run `build` only when a guest is still needed; it does not overwrite or repair an existing partial VM automatically. After a successful build, complete isolation/snapshot validation, configuration, startup, and the real execution check in steps 6–7. Installing the bridge alone does not make Cuckoo ready.
-
-Keep the existing `.env`, `.local/`, database, and sample storage. Do not copy `.env.example` over this installation or reinstall an existing VM just to restart the application.
+Preserve the existing `.env`, `.local/`, database and sample storage. Run the automated setup command above in your terminal; verified media and complete snapshots are reused. Missing sudo authentication stops setup before host changes. See [implementation verification](docs/IMPLEMENTATION_VERIFICATION.md) for the current checks and blockers.
 
 ## Local setup, step by step
 
@@ -63,7 +78,7 @@ node --version
 npm --version
 ```
 
-Use Python 3.10 or newer for the application dependencies; this checkout was tested locally with Python 3.13, and the backend image uses 3.12. Use **Node.js 22**, matching the frontend image. If your distribution installs a different Node major version, install/select Node 22 before continuing. For an already installed nvm:
+Use Python 3.10 or newer for the application dependencies; this checkout was tested locally with Python 3.13, and the backend image uses 3.12. The frontend container uses **Node.js 22**; the current native installation was also verified with **Node.js 24.19.0**. Keep the selected Node/npm installation consistent between terminal startup and the user service. To select the container baseline with an already installed nvm:
 
 ```bash
 nvm install 22
@@ -82,9 +97,9 @@ This installs Python dependencies into `.venv-local`, installs frontend packages
 
 To select a specific application Python on a **fresh** checkout, use `APP_PYTHON=python3.12 bash setup-local.sh`, for example. Setup reuses an existing `.venv-local`; changing `APP_PYTHON` does not replace it.
 
-Setup generates missing database/Redis passwords, preserves provider keys and external-sharing policy, and saves the first previous configuration to `.local/.env.before-local`. Existing initialized databases retain their passwords. There is no application username/password to configure.
+Setup generates missing database/Redis passwords, preserves provider keys and external-sharing policy, and saves the first previous configuration to `.local/.env.before-local`. Existing initialized databases retain their passwords. No application credentials are generated or required.
 
-You can now run `./start` for static analysis and provider lookups, but dynamic analysis remains unavailable until steps 3–7 are complete. Stop with `./stop.sh` before preparing/reconfiguring the guest infrastructure.
+You can now run `npm start` with `SANDBOX_ENABLED=false` for static analysis and provider lookups. Steps 3–7 are optional and enable dynamic analysis. Stop with `./stop.sh` before preparing/reconfiguring the guest infrastructure.
 
 ### 3. Install Cuckoo 3 and VMCloak
 
@@ -190,7 +205,7 @@ If the app was already running before your configuration edits, run `./stop.sh` 
 
 Successful dynamic verification requires **exit code 0**, `"workflow_verified": true`, and `"sandbox_verified": true` in `.local/verification/status.json`. The report is saved to `.local/verification/report.json`. Exit code 2 means execution is not verified; exit code 1 indicates a verification error. `--allow-unavailable` can exercise the partial workflow but still returns 2 without dynamic execution.
 
-After successful setup, set `CUCKOO_REQUIRED=true` if startup should fail whenever Cuckoo is unavailable. The default `false` allows the app to start with explicit dynamic-analysis gaps. This option only applies when `CUCKOO_AUTO_START=true`.
+After successful setup, use `SANDBOX_ENABLED=true` and `CUCKOO_REQUIRED=true` to require sandbox readiness. With `SANDBOX_ENABLED=false`, the website starts independently and reports dynamic-analysis gaps.
 
 ## Daily startup and LAN access
 
@@ -200,7 +215,7 @@ From the project root:
 ./start
 ```
 
-`./start.sh` is equivalent. If file permissions were lost, use `bash start.sh`. The command is `./start`, not `/start` or a browser route. It starts PostgreSQL, Redis, migrations, the configured local Cuckoo API/core, FastAPI, Celery worker/beat, and Next.js. It checks backend dependencies, the frontend API proxy, and worker readiness. Already running managed processes are reused; restart to load backend or `.env` changes.
+`./start.sh` is equivalent. If file permissions were lost, use `bash start.sh`. The command is `./start`, not `/start` or a browser route. It starts PostgreSQL, Redis, migrations, FastAPI, the dedicated workers/scheduler, the production Next.js server and recovery supervisor. Cuckoo is started only when explicitly enabled. It checks backend dependencies, the frontend API proxy, and worker readiness. Already running managed processes are reused; restart to load backend or `.env` changes.
 
 Open `http://HOST_LAN_IP:3100` on the other machine. Use the LAN URL printed by startup, or inspect the active Wi-Fi/Ethernet interface with `ip -br -4 address`. For example, if that interface has `172.20.10.3`, open `http://172.20.10.3:3100`. The address can change after reconnecting; do not use a Docker, VPN, or guest-bridge address unless that network is the intended client network.
 
@@ -212,7 +227,7 @@ Open `http://HOST_LAN_IP:3100` on the other machine. Use the LAN URL printed by 
 | PostgreSQL | `127.0.0.1:55432` |
 | Redis | `127.0.0.1:56379` |
 
-`FRONTEND_HOST` may restrict the listener to one host interface. Permit the frontend port from your intended LAN in the host firewall, and ensure Wi-Fi client isolation allows peer access. Keep the database, queue, Cuckoo management API and guest network private. The application has no login, so LAN reachability grants workspace access.
+`FRONTEND_HOST` may restrict the listener to one host interface. Permit the frontend port from your intended LAN in the host firewall, and ensure Wi-Fi client isolation allows peer access. Keep the database, queue, Cuckoo management API and guest network private. Anyone who can reach the frontend can access the shared workspace, upload samples and record decisions.
 
 Uploads, events, decisions, reports, and API documentation use the same frontend origin. Next proxies relative `/api/...` requests to the backend; no remote browser API URL needs to point at `localhost`. The backend accepts same-origin proxy writes and rejects foreign browser origins. Open API documentation at `http://HOST_LAN_IP:3100/api/docs`.
 
@@ -220,7 +235,7 @@ Uploads, events, decisions, reports, and API documentation use the same frontend
 # Run from the host.
 .venv-local/bin/python scripts/local.py status
 curl --fail http://127.0.0.1:3100/health
-curl --fail http://127.0.0.1:3100/api/providers/health
+# Provider details are available in Settings.
 
 # Stop or restart after editing backend code/.env.
 ./stop.sh
@@ -251,7 +266,7 @@ tail -n 80 .local/logs/cuckoo-api.log
 tail -n 80 .local/logs/cuckoo-core.log
 ```
 
-Back up the database, sample/report storage, guest artifacts and `.env` before migration or infrastructure changes. Do not delete `.local/` to repair startup. Existing jobs and historical audit actors remain; new actions use the unauthenticated shared `LAN workspace` actor. The old application username/password/session settings are unused. Provider and database credentials remain required and must stay private.
+Back up the database, sample/report storage, guest artifacts and `.env` before migration or infrastructure changes. Do not delete `.local/` to repair startup. Historical audit actors remain; analysis data expires under the seven-day retention policy. New actions use the unauthenticated shared `LAN workspace` actor. The old application username/password/session settings are unused. Provider and database credentials remain required and must stay private.
 
 ## Workflow and approval
 
@@ -260,7 +275,7 @@ Back up the database, sample/report storage, guest artifacts and `.env` before m
 3. Cuckoo 3 submission uses `/submit/file`, Token authentication, a matching Windows platform/version, and a configured execution deadline. Its analysis ID and task IDs are retained. Completed reports must match the submitted SHA-256 and reported task identities. Unknown POST outcomes are never blindly resubmitted.
 4. The UI receives persisted status through SSE with polling fallback. Failed/unavailable/timed-out engines remain visible; a completed job can have coverage gaps.
 5. Malware scoring and approval are separate. An approval recommendation includes criteria, findings, coverage gaps, reasons, and limitations. Record an explicit decision and reason in the analysis page. Approving through the API is also blocked unless the recommendation is **Approve**. Decision history is append-only in the existing review table.
-6. Export JSON or print the report. JSON includes every operation, source evidence, policy snapshot, recommendation, current decision history, errors, and limitations. Stored analysis evidence is unchanged by later decisions. An unavailable report store produces an explicit error.
+6. View the HTML report or download JSON/PDF. Both downloadable formats are generated automatically at completion. JSON includes every operation, source evidence, policy snapshot, recommendation, current decision history, errors, and limitations. Stored analysis evidence is unchanged by later decisions. An unavailable report store produces an explicit error.
 
 | Recommendation | Criteria |
 |---|---|
@@ -277,15 +292,19 @@ APPROVAL_REQUIRE_REPUTATION=true
 APPROVAL_MIN_REPUTATION_ENGINES=20
 ```
 
-Required evidence always includes validation, hashing, static inspection, YARA, sandbox, observed processes, network capture metadata, verdict, and report. Completed flags alone do not qualify. Empty network events can represent a real capture with no traffic; absent telemetry cannot. Optional providers can be unconfigured; actual execution failures still require review. Disabling the reputation requirement is an explicit policy choice, not a workaround for missing sandbox evidence.
+Required evidence includes validation, hashing, static inspection, YARA, vulnerability matching, sandbox, observed processes, network and DNS capture metadata, verdict, and report. Completed flags alone do not qualify. Empty network events can represent a real capture with no traffic; absent telemetry cannot. Optional providers can be unconfigured; actual execution failures still require review. Disabling the reputation requirement is an explicit policy choice, not a workaround for missing sandbox evidence.
 
 Malware policy 1.1 scores VT malicious/suspicious counts, Hybrid malicious/suspicious verdicts, YARA matches, observed high-severity behavior, and Cuckoo 3 task scores (9–10 adds 70; 6–8 adds 30; positive scores below 6 add 10). Scores ≥60 are likely malicious; ≥20 suspicious. A lower score requires configured coverage/reputation for a likely-benign finding. AI indicators contribute no malware points.
 
-**No malicious behavior detected is not proof of safety or absence of vulnerabilities.** There is no CVE, dependency, or vulnerability scanner in this implementation. Reports explicitly mark vulnerability assessment as `NOT_PERFORMED`. Certificate presence also does not establish signature trust. Execution time, guest configuration, encrypted traffic, background activity, and unavailable raw telemetry limit conclusions.
+**No malicious behavior detected is not proof of safety or absence of vulnerabilities.** Product/version advisory matching now queries NVD, CVE Program records, CISA KEV, GitHub Advisories and OSV where verified package identifiers exist. Published vendor and exploit references are preserved without executing exploits. Matches distinguish confirmed affected, potentially affected, not affected and unknown versions. Unsupported mappings or failed providers produce a partial assessment. PE identity is self-reported; this is neither an embedded dependency inventory nor proof of binary authenticity. Historical reports without a lookup retain `NOT_PERFORMED`.
+
+`NVD_API_KEY` and `GITHUB_ADVISORIES_TOKEN` are optional backend credentials. Requests have deadlines, retry/rate limits and a 24-hour expiring cache. The curated product/package catalog is `backend/app/software_catalog.json`; unverified names never become confirmed product mappings. There is no vulnerability-age cutoff. Known vulnerabilities require approval review separately from the malware score.
+
+Uploads support an exact 2 GiB file (2,147,483,648 bytes) using checksummed, resumable 8 MiB chunks. The browser fingerprints the selected file, reports progress/speed, and safely retries interrupted chunks. Reselect the same file to resume; inactive staging chunks expire after one hour. Worker submission and storage use files/streams. Static string extraction scans a bounded prefix and reports truncation; full-file hashes and YARA remain separate operations. External reputation uploads retain their provider-size limits.
 
 ## Providers and sharing
 
-Set backend-only `VIRUSTOTAL_API_KEY` and `HYBRID_ANALYSIS_API_KEY` if needed. Settings performs real connectivity checks; configured credentials alone are not called healthy. Hash lookup may return no existing report. Sending file contents to either external provider requires both `EXTERNAL_UPLOADS_ENABLED=true` and per-job consent. Provider API credentials remain required even though application login is removed.
+Set backend-only `VIRUSTOTAL_API_KEY` and `HYBRID_ANALYSIS_API_KEY` if needed. Settings performs real connectivity checks; configured credentials alone are not called healthy. Hash lookup may return no existing report. Sending file contents to either external provider requires both `EXTERNAL_UPLOADS_ENABLED=true` and per-job consent. Provider API credentials remain configured in the backend; the workspace itself has no login.
 
 For Cuckoo use `SANDBOX_KIND=cuckoo3`, `CUCKOO_API_URL`, and `CUCKOO_API_TOKEN`. Legacy `cuckoo` and CAPE `cape` routes remain supported separately. Cuckoo 3 API/normalization is checked against the pinned source and [upstream Web API](https://cuckoo-hatch.cert.ee/static/docs/using/web-api-endpoints/). See [sandbox/README.md](sandbox/README.md) for host/guest setup and live verification.
 
@@ -332,7 +351,7 @@ EXTERNAL_UPLOADS_ENABLED=false
 MOCK_ANALYSIS=false
 ```
 
-These are placeholders, not usable credentials. There are no application login settings. If converting an existing local `.env`, replace its localhost database/Redis URLs and filesystem storage settings with these Docker values while retaining provider keys. Do not run `setup-local.sh` in Docker mode: it rewrites the URLs for local processes.
+These are placeholders, not usable credentials. Use `APP_ENV=production`; there are no application login settings. If converting an existing local `.env`, replace its localhost database/Redis URLs and filesystem storage settings with these Docker values while retaining provider keys. Do not run `setup-local.sh` in Docker mode: it rewrites the URLs for local processes.
 
 Set `SANDBOX_KIND`, `CUCKOO_API_URL` and `CUCKOO_API_TOKEN` for the sandbox that the containers can actually reach. Container `127.0.0.1` refers to the container itself, so the local default `http://127.0.0.1:8090` will not reach the host's Cuckoo API. Use a separately configured, restricted management endpoint and confirm isolation before setting `SANDBOX_ISOLATION_CONFIRMED=true`. A remote API is not started by this Compose file.
 
@@ -345,7 +364,7 @@ docker compose ps -a
 curl --fail http://127.0.0.1:8080/health
 ```
 
-Open **`http://HOST_LAN_IP:8080`** without login. Only Nginx is published; it proxies API, uploads, SSE and frontend traffic. `FRONTEND_PORT` affects local mode, not this fixed Compose port. MinIO is built from the included Dockerfile, so the first build may take longer.
+Open **`http://HOST_LAN_IP:8080`** directly. Only Nginx is published; it proxies API, uploads, SSE and frontend traffic. `FRONTEND_PORT` affects local mode, not this fixed Compose port. MinIO is built from the included Dockerfile, so the first build may take longer.
 
 `migrate` and `storage-init` are one-time services: **Exited (0) is expected**. If either exits unsuccessfully, inspect:
 
@@ -422,7 +441,39 @@ This optional degraded-mode check performs a real upload, waits for processing, 
 | ISO download reaches `65/65`, then `OSError: [Errno 28] No space left on device` | The assembled ISO needs disk space in addition to the fragments. Follow [disk-space recovery](sandbox/README.md#iso-download-fails-with-no-space-left-on-device). Lowering guest RAM does not fix this stage. |
 | Guest build failed / image already exists | Preserve the partial artifacts and inspect the VMCloak error. Do not repeatedly rerun init or remove the whole `.local` directory. |
 | Analysis stays queued | Confirm worker and scheduler are running with `scripts/local.py status`; inspect worker/scheduler logs and `/api/providers/health`. |
+| Redis exits with `Failed to configure LOCALE for invalid locale name` | An IDE/terminal can inherit a locale that is not installed on the host. Local startup now writes `locale-collate C` to its private Redis configuration, so `npm start` works independently of that terminal setting. No Redis data reset or system locale change is needed. |
 | Report says `COMPLETED_WITH_GAPS` / `REVIEW_REQUIRED` | Read engine reasons and acceptance criteria. Unavailable execution or missing reputation is not a successful clean analysis. |
 | Configuration edits appear ignored | Run `./stop.sh` then `./start`, or recreate the affected Docker containers. |
 
 [API reference](docs/API.md) · [Security boundary](docs/SECURITY.md) · [Worker semantics](workers/README.md)
+
+## Automatic seven-day retention
+
+Run `npm start` **from the repository root** for normal local startup (`npm stop` stops the managed processes). This invokes the existing startup manager, applies migrations, and starts the analysis worker, a dedicated maintenance worker, and Celery beat. The maintenance queue remains available even when both analysis worker slots are busy. Compose starts the same maintenance service. Restart existing processes after upgrading so they load the new task routes and locking code.
+
+Each analysis expires **168 hours after its original UTC creation time**, including existing records and failed analyses. The history list, sample history and analysis view show this deadline in the browser's local time. Reports and files are retained for seven days, with these safety rules:
+
+- Expiration is checked every minute. A complete storage sweep runs every 24 hours; temporary storage is checked hourly. A daily-only job could leave expired data for another day, so the minute check handles normal expiration separately. Deletion happens on the first available check after the deadline, not exactly at the millisecond. Downtime, cleanup errors and active work can delay it.
+- Queued/running analyses are never deleted. Upstream sandbox tasks must also be confirmed finished before deletion; a local timeout is insufficient. A job that finishes after its deadline becomes eligible immediately.
+- The cleaner removes stored JSON/PDF/HTML reports and per-analysis artifact trees, then engine results, normalized evidence, analyst decisions, linked audit entries and the history record. The upload and sample metadata are removed when the **last** referencing analysis is deleted. A fresh or running analysis of the same hash keeps its shared upload.
+- Unreferenced uploads and safe failed-job scratch files become eligible after **one hour**. Recent writes and scratch belonging to active jobs are protected. Application multipart/spooled uploads close automatically with their request; cleanup never sweeps the system `/tmp` directory or unrelated host directories.
+- Files are deleted before the database references are committed away. Missing files are harmless on retry. A failed deletion leaves the analysis inventory intact, records `cleanup_retry_at`/`cleanup_error`, logs the analysis ID and error type, and retries after 24 hours. Some expired files may already have been removed when a later deletion fails. The UI marks these analyses “Cleanup pending.”
+- PostgreSQL transaction advisory locks allow only one cleaner across workers/hosts/beat instances, and coordinate upload/reanalysis creation with physical deletion. They release on process/connection termination without a time-based lease expiring halfway through cleanup. All instances must share the same database and storage; SQLite is only used for unit tests.
+
+Storage keys are restricted to `samples/<sha256>`, `reports/<analysis-uuid>.json|pdf|html`, `reports/<analysis-uuid>/...`, and `<analyses|artifacts|logs|screenshots|extracted|tmp|uploads>/<analysis-uuid>/...`. New artifact producers must use these owned directories and keep the job active until writing ends. Arbitrary paths in provider reports are never followed. Filesystem symlinks are rejected. The S3/MinIO path removes **every object version and delete marker**, not just a marker hiding the latest version. The bucket credential needs version listing/deletion and multipart listing/abort permissions in addition to the existing read/write permissions. Object Lock or denied deletion produces a retryable failure.
+
+CAPE/Cuckoo cleanup uses each recorded task ID, verifies its current state and sample hash, and calls the service's deletion endpoint. The Cuckoo 3 route is verified against this checkout's pinned upstream source; CAPE's task-delete API must be enabled. An unavailable service, changed endpoint, unknown submission outcome or denied deletion retains the local cleanup inventory and logs a retry. For the managed local Cuckoo 3 installation, the daily sweep also collects expired unreferenced shared binaries: it waits for all application and sandbox analyses to finish, stops only its managed Cuckoo writers, inventories all remaining submitted/target hashes, and restarts and checks the API. Incomplete inventory or unmanaged writers defer deletion. External sandbox caches, reputation providers' copies, independent backups and VM snapshots remain managed by their owning systems. Do not assume this local retention policy controls third-party retention. It does delete the application's uploaded bytes and analysis artifacts, and requests deletion of the owning sandbox's per-analysis results.
+
+Local cleanup logs are in `.local/logs/maintenance.log`; Compose logs are under the `maintenance` service. The scheduler stores its full/hourly sweep timestamps in PostgreSQL, so multiple beat instances or restarts do not repeat full sweeps continuously. Existing records older than seven days are eligible on the first check after deployment.
+
+Verification:
+
+```bash
+PYTHONPATH=backend .venv-local/bin/python -m pytest backend/tests -q
+npm run typecheck --prefix frontend
+# Optional real PostgreSQL checks, using a disposable test database:
+RETENTION_TEST_DATABASE_URL=postgresql+psycopg://USER@localhost/TEST_DATABASE \
+  PYTHONPATH=backend .venv-local/bin/python -m pytest backend/tests/test_retention_postgres.py -q
+```
+
+Tests cover real filesystem removal, all related database tables, the exact 168-hour boundary, shared uploads, active jobs, scratch cleanup, partial deletion retries, S3 versions, sandbox deletion contracts, and independent PostgreSQL sessions competing with reanalysis. Sandbox and S3 contract fixtures do not establish deletion on a live remote sandbox or bucket.

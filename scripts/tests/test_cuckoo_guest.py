@@ -151,3 +151,20 @@ def test_cli_keeps_os_error_details(monkeypatch, capsys):
         runpy.run_path(guest.__file__, run_name='__main__')
     assert error.value.code == 1
     assert 'Guest setup failed: OSError: [Errno 28] No space left on device' in capsys.readouterr().err
+
+
+def test_snapshot_is_complete_only_with_committed_registration_and_matching_files(tmp_path):
+    import sqlite3,json
+    values={'VMCLOAK_CWD':str(tmp_path)}
+    with sqlite3.connect(tmp_path/'repository.db') as db:
+        db.executescript('CREATE TABLE image(name TEXT,path TEXT,adapter TEXT,ipaddr TEXT); CREATE TABLE snapshot(vmname TEXT,ipaddr TEXT);')
+    assert not guest.guest_state(values)['snapshot_partial']
+    folder=tmp_path/'vms/qemu/sentinel-win10';folder.mkdir(parents=True)
+    (folder/'disk.qcow2').write_bytes(b'fixture disk')
+    (folder/'memory.snapshot').write_bytes(b'fixture snapshot')
+    (folder/'machineinfo.json').write_text(json.dumps({'machinery':'qemu','machine':{'name':'sentinel-win10','ip':'192.168.30.10'}}))
+    assert guest.guest_state(values)['snapshot_partial'] and not guest.guest_state(values)['snapshot_complete']
+    with sqlite3.connect(tmp_path/'repository.db') as db:db.execute("INSERT INTO snapshot VALUES ('sentinel-win10','192.168.30.10')")
+    assert guest.guest_state(values)['snapshot_complete']
+    with sqlite3.connect(tmp_path/'repository.db') as db:db.execute("UPDATE snapshot SET ipaddr='192.168.30.11'")
+    assert not guest.guest_state(values)['snapshot_complete']

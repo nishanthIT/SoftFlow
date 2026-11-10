@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app import main,tasks,storage
 from app.config import settings
-from app.models import Base
+from app.models import Base, ENGINES
 
 @pytest.fixture
 def client(monkeypatch):
@@ -17,10 +17,21 @@ def client(monkeypatch):
     Base.metadata.create_all(db)
     session=sessionmaker(db,expire_on_commit=False)
     monkeypatch.setattr(main,'Session',session);monkeypatch.setattr(tasks,'Session',session)
+    from app import ssl_checks
+    monkeypatch.setattr(ssl_checks,'Session',session)
     monkeypatch.setattr(settings,'mock_analysis',False)
     objects={}
     monkeypatch.setattr(storage,'put',lambda key,data,*args:objects.__setitem__(key,data))
     monkeypatch.setattr(storage,'get',lambda key:objects[key])
+    from pathlib import Path
+    from contextlib import contextmanager
+    import tempfile
+    monkeypatch.setattr(storage,'put_file',lambda key,path,*args:storage.put(key,Path(path).read_bytes(),*args))
+    @contextmanager
+    def materialize(key):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'sample';path.write_bytes(objects[key]);yield path
+    monkeypatch.setattr(storage,'materialize',materialize)
     with TestClient(main.app) as c: yield c
 
 def pe():
@@ -41,7 +52,7 @@ def test_upload_hash_duplicate_and_job(client):
     assert second['duplicate'] and second['sample_id']==r['sample_id']
     assert second['analysis_id']!=r['analysis_id']
     job=client.get('/api/analysis/'+r['analysis_id']).json()
-    assert job['status']=='QUEUED' and job['progress']==0 and len(job['engines'])==13
+    assert job['status']=='QUEUED' and job['progress']==0 and len(job['engines'])==len(ENGINES)
     assert job['sample']['filename']=='good.exe'
     assert job['consent'] is False
     renamed=client.get('/api/analysis/'+second['analysis_id']).json()
@@ -98,6 +109,12 @@ def test_real_pipeline_without_external_providers(client,monkeypatch):
     assert all(s['status'] not in ['RUNNING','QUEUED'] for s in exported['steps'])
     assert exported['summary']['errors_or_gaps']==len(exported['errors'])
     assert not any(g['engine'] in ['verdict','report'] for g in exported['verdict']['coverage_gaps'])
+    assert exported['vulnerability_assessment']['status']=='IDENTIFICATION_REQUIRED'
+    assert stages['dns']['status']=='UNAVAILABLE'
+    assert storage.get('reports/'+id+'.pdf').startswith(b'%PDF-')
+    pdf=client.get('/api/analysis/'+id+'/report.pdf')
+    assert pdf.status_code==200 and pdf.content.startswith(b'%PDF-')
+    assert pdf.headers['content-type']=='application/pdf'
     monkeypatch.setattr(storage,'get',lambda _:(_ for _ in ()).throw(OSError('offline')))
     assert client.get('/api/analysis/'+id+'/report').status_code==503
 
@@ -121,11 +138,30 @@ def test_report_write_failure_fails_job_and_remains_exportable(client,monkeypatc
     assert all(s['status'] not in ['RUNNING','QUEUED'] for s in result['steps'])
 
 
-def test_no_login_routes_or_session_requirement(client):
+def test_repeated_worker_loss_stops_retrying_and_closes_stages(client,monkeypatch):
+    from app.models import Job
+    class Lease:
+        def acquire(self,**kw):return True
+        def release(self):pass
+    class LockStore:
+        def lock(self,*a,**kw):return Lease()
+    monkeypatch.setattr(tasks.Redis,'from_url',lambda *a,**kw:LockStore())
+    identifier=client.post('/api/samples',files={'file':('recovery.exe',pe())}).json()['analysis_id']
+    with tasks.Session.begin() as db:
+        job=db.get(Job,identifier);job.status='RUNNING';job.attempts=3
+    with pytest.raises(RuntimeError,match='recovery limit'):tasks.run.run(identifier)
+    result=client.get('/api/analysis/'+identifier).json()
+    assert result['status']=='FAILED' and result['completed_at']
+    assert all(stage['status']=='FAILED' for stage in result['engines'])
+    tasks.run.run(identifier)  # Redelivery of a terminal job is harmless.
+
+
+def test_development_mode_can_run_without_login(client):
     assert client.get('/api/samples').status_code==200
     assert client.get('/api/admin').status_code==200
     assert client.get('/api/settings').json()['authentication_required'] is False
-    assert client.post('/api/auth/login',json={}).status_code==404
+    assert client.get('/api/auth/session').status_code==404
+    assert client.post('/api/auth/login',json={'username':'admin','password':'unused'}).status_code==404
     assert not client.cookies
 
 
@@ -171,3 +207,30 @@ def test_final_report_appends_decision_history_without_changing_evidence(client)
     assert len(result['decisions'])==2 and result['decisions'][0]['data']['decision']=='REJECT'
     assert all(e['status']=='FAILED' for e in result['engines'])
     assert result['vulnerability_assessment']['status']=='NOT_PERFORMED'
+
+
+def test_certificate_feature_is_available_without_login(client):
+    assert client.get('/api/ssl-checks').status_code==200
+    result=client.post('/api/ssl-checks',files={'file':('domains.txt',b'example.org')})
+    assert result.status_code==201 and result.json()['status']=='QUEUED'
+    assert client.get('/api/ssl-checks/'+result.json()['id']).status_code==200
+    assert 'app.tasks.ssl_run' in tasks.celery.tasks
+    assert not client.cookies
+
+
+def test_presentation_mode_does_not_contact_sandbox(monkeypatch):
+    from app import provider_status,providers
+    monkeypatch.setattr(settings,'presentation_mode',True)
+    monkeypatch.setattr(provider_status.httpx,'get',lambda *a,**k:pytest.fail('No sandbox request'))
+    status=provider_status.check('sandbox')
+    assert status['status']=='DISABLED' and status['execution_ready'] is False
+    with pytest.raises(providers.Unavailable,match='presentation mode'):providers.sandbox_provider()
+
+
+def test_multipart_accepts_name_version_without_changing_uploaded_sample(client):
+    response=client.post('/api/samples',files={'file':('fixture.exe',pe())},data={'software_name':'7-Zip','software_version':'16.00'})
+    assert response.status_code==201
+    job=client.get('/api/analysis/'+response.json()['analysis_id']).json()
+    assert job['software_identity']=={'name':'7-Zip','version':'16.00','vendor':''}
+    assert response.json()['sha256']==hashlib.sha256(pe()).hexdigest()
+    assert client.post('/api/samples',files={'file':('fixture.exe',pe())},data={'software_name':'7-Zip'}).status_code==422
