@@ -18,6 +18,7 @@ CUCKOO_REQUIRED=true
 CUCKOO_AUTO_START=false
 CUCKOO_START_EXISTING=true
 CUCKOO_API_URL=http://127.0.0.1:8090
+CUCKOO_API_TOKEN=
 CUCKOO_BINARY=/home/nishanth/.venvs/cuckoo/bin/cuckoo
 CUCKOO_CWD=/home/nishanth/.cuckoo
 APPROVAL_REQUIRE_REPUTATION=false
@@ -36,6 +37,20 @@ An explicit token takes precedence. Tokens are never printed or passed on the co
 Set `SANDBOX_ISOLATION_CONFIRMED=true` only after your guest isolation and clean-snapshot
 restoration have been verified. Startup preserves that setting; an active bridge alone
 is not verification of guest restoration.
+
+An update to `.env.example` does not change the server's existing `.env`. Replace
+older `SANDBOX_KIND=cuckoo3`, `SANDBOX_ENABLED=false`, `CUCKOO_AUTO_START=true`, and
+`CUCKOO_CWD=.local/cuckoo` entries with the settings above when switching to your
+existing Python 2.7 Cuckoo. Leave `CUCKOO_API_TOKEN` empty to discover that installation's
+token instead of reusing a token from the separate Cuckoo 3 installation. Edit existing
+entries in place so each setting appears only once.
+
+Keep `ALLOWED_ORIGINS` as a JSON list, for example
+`ALLOWED_ORIGINS=["http://localhost:3100","http://127.0.0.1:3100"]`.
+The provider diagnostic command uses the same settings parser as application startup.
+If it raises `allowed_origins: Input should be a valid list` for a valid JSON list,
+update `backend/app/check_providers.py` to include the diagnostic parser fix before
+retrying; changing the list into a plain string will not fix that older helper.
 
 On the same host, an authenticated running API is reused. If the local API port is closed,
 startup launches the existing Cuckoo 2 executable and its API with that working directory.
