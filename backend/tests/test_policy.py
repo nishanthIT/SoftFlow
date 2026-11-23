@@ -13,24 +13,24 @@ def paths(monkeypatch):
 
 def test_missing_engines_never_clean():
     r=policy.verdict({'virustotal':{'status':'UNAVAILABLE','data':{},'reason':'Not configured'}})
-    assert r['security']=='INCONCLUSIVE'
+    assert r['security']=='MANUAL_REVIEW'
     assert r['coverage_gaps'][0]['status']=='UNAVAILABLE'
 
 def test_malicious_evidence_traceable():
     r=policy.verdict({'virustotal':{'status':'COMPLETED','data':{'stats':{'malicious':8}}}})
-    assert r['security']=='LIKELY_MALICIOUS'
+    assert r['security']=='MALICIOUS'
     assert r['reasons'][0]['source']=='virustotal'
 
 def test_benign_requires_coverage():
-    results={k:{'status':'COMPLETED','data':{}} for k in ['static','yara','virustotal','sandbox','behavior','network']}
-    results['virustotal']['data']={'stats':{'undetected':40}}
-    assert policy.verdict(results)['security']=='LIKELY_BENIGN'
+    from test_detection_threshold import evidence
+    results=evidence(0)
+    assert policy.verdict(results)['security']=='LEGITIMATE'
     results['sandbox']['status']='TIMEOUT'
-    assert policy.verdict(results)['security']=='INCONCLUSIVE'
+    assert policy.verdict(results)['security']=='MANUAL_REVIEW'
 
 def test_ai_never_increases_malware_score():
     r=policy.verdict({'ai':{'status':'COMPLETED','data':{'status':'DETECTED','providers':['OpenAI']}}})
-    assert r['score']==0 and r['security']=='INCONCLUSIVE'
+    assert r['score']==0 and r['security']=='MANUAL_REVIEW'
 
 def test_static_sdk_not_usage():
     r=policy.ai_detect({'strings':['openai.resources']},{},True,False)

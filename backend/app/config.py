@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     cuckoo_api_url: str = ''
     cuckoo_api_token: str = ''
     cuckoo_auto_start: bool = False
-    sandbox_kind: Literal['cape', 'cuckoo', 'cuckoo3'] = 'cape'
+    sandbox_kind: Literal['cape', 'cuckoo', 'cuckoo3'] = 'cuckoo'
     sandbox_isolation_confirmed: bool = False
     sandbox_analysis_timeout: int = Field(120, ge=10, le=1200)
     sandbox_os_version: str = '10'
@@ -52,10 +52,11 @@ class Settings(BaseSettings):
     software_catalog_path: str = str(Path(__file__).resolve().parent / 'software_catalog.json')
     provider_timeout: int = Field(900, ge=30, le=1800)
     hybrid_environment_id: int = 160
+    detection_review_threshold: int = Field(3, ge=1, le=1000)
     approval_max_score: int = Field(0, ge=0, le=19)
     approval_reject_score: int = Field(60, ge=20, le=100)
     approval_min_reputation_engines: int = Field(20, ge=1)
-    approval_require_reputation: bool = True
+    approval_require_reputation: bool = False
     yara_path: str = '/yara/rules'
     ai_signatures_path: str = '/ai-signatures/providers.json'
     mock_analysis: bool = False

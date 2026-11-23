@@ -127,7 +127,7 @@ f.write_text(yaml.safe_dump(d,sort_keys=False))
         match=re.search(r'Created key ([a-f0-9]+) with ID:',result.stdout)
         if not match:raise RuntimeError('Could not obtain API token; inspect the Cuckoo token owner configuration')
         set_key(ROOT/'.env','CUCKOO_API_TOKEN',match.group(1))
-    for key,value in {'SANDBOX_KIND':'cuckoo3','CUCKOO_AUTO_START':'true',
+    for key,value in {'CUCKOO_MODE':'managed','SANDBOX_KIND':'cuckoo3','CUCKOO_AUTO_START':'true',
                       'CUCKOO_API_URL':values.get('CUCKOO_API_URL') or 'http://127.0.0.1:8090',
                       'CUCKOO_CWD':values.get('CUCKOO_CWD') or '.local/cuckoo',
                       'CUCKOO_VENV':values.get('CUCKOO_VENV') or '.local/cuckoo-venv'}.items():

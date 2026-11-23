@@ -1,3 +1,5 @@
+> Already configured Cuckoo on your server? Follow [Reuse existing Cuckoo](docs/existing-cuckoo.md), then use `./start`. This path preserves your network, VMs, snapshots and Cuckoo configuration. The provisioning instructions below are only for a separate, repository-managed Cuckoo 3 installation.
+
 # SentinelScan — setup and operation
 
 Analyze Windows EXE files with static inspection, YARA, reputation providers, and an isolated Cuckoo guest. Review the evidence, record an approval decision, and download the report. The private LAN workspace opens directly without a login. Static analysis and reports work independently of Cuckoo.

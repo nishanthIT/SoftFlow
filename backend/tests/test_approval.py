@@ -51,9 +51,9 @@ def test_reject_and_intermediate_review():
     assert recommend('COMPLETED',engines)['recommendation']=='REVIEW_REQUIRED'
 
 
-def test_cuckoo_score_is_rejection_evidence():
+def test_cuckoo_score_needs_review_not_interpreted_as_engine_count():
     result=policy.verdict({'sandbox':{'status':'COMPLETED','data':{'source':'cuckoo3','report':{'tasks':[{'post':{'score':9}}]}}}})
-    assert result['score']==70 and result['security']=='LIKELY_MALICIOUS'
+    assert result['score']==50 and result['security']=='MANUAL_REVIEW'
 
 
 def test_policy_snapshot_survives_configuration_change(monkeypatch):

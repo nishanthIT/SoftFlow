@@ -91,38 +91,20 @@ def ai_detect(static, net, static_ok, network_ok, observed_behavior=None):
 
 def verdict(results):
     from .approval import criteria
-    reasons=[]; score=0
-    def add(points,source,evidence):
-        nonlocal score
-        score+=points; reasons.append({'points':points,'source':source,'evidence':evidence})
-    vt=results.get('virustotal',{}).get('data',{}); stats=vt.get('stats',{})
-    malicious=stats.get('malicious',0)
-    if malicious>=5: add(70,'virustotal',f'{malicious} engines classified malicious')
-    elif malicious: add(30,'virustotal',f'{malicious} engines classified malicious')
-    if stats.get('suspicious',0): add(10,'virustotal','Suspicious provider detections')
-    ha=results.get('hybrid-analysis',{}).get('data',{})
-    if ha.get('verdict')=='malicious': add(60,'hybrid-analysis','Provider verdict: malicious')
-    elif ha.get('verdict')=='suspicious': add(25,'hybrid-analysis','Provider verdict: suspicious')
-    yara=results.get('yara',{}).get('data',{}).get('matches',[])
-    if yara: add(25,'yara',{'rules':[m['rule'] for m in yara]})
-    high=[e for e in results.get('behavior',{}).get('data',{}).get('events',[]) if e['severity']=='high']
-    if high: add(30,'behavior',high[:10])
-    sandbox=results.get('sandbox',{})
-    if sandbox.get('status')=='COMPLETED' and sandbox.get('data',{}).get('source')=='cuckoo3':
-        scores=[item.get('post',{}).get('score',0) for item in sandbox['data'].get('report',{}).get('tasks',[])]
-        severity=max((s for s in scores if isinstance(s,(int,float))),default=0)
-        if severity>=9: add(70,'sandbox',f'Cuckoo 3 reported score {severity}/10')
-        elif severity>=6: add(30,'sandbox',f'Cuckoo 3 reported score {severity}/10')
-        elif severity>0: add(10,'sandbox',f'Cuckoo 3 reported score {severity}/10; review low-severity findings')
-    required=['static','yara','sandbox','behavior','network']+(['virustotal'] if settings.approval_require_reputation else [])
-    coverage=all(results.get(k,{}).get('status')=='COMPLETED' for k in required)
-    trusted_clean=not settings.approval_require_reputation or stats.get('harmless',0)+stats.get('undetected',0)>=settings.approval_min_reputation_engines
-    state='LIKELY_MALICIOUS' if score>=60 else 'SUSPICIOUS' if score>=20 else 'LIKELY_BENIGN' if coverage and trusted_clean else 'INCONCLUSIVE'
-    gaps=[{'engine':k,'status':v['status'],'reason':v.get('reason')} for k,v in results.items() if k not in ['verdict','report'] and v['status']!='COMPLETED']
+    from .detection_policy import assess
+    decision=assess(results)
+    state=decision['security']
+    reasons=[{'source':entry['source'],'points':0,'evidence':f"{entry['count']} {entry['basis']}"} for entry in decision['detection_sources']]
+    reasons.extend({'source':'correlation','points':0,'evidence':message} for message in decision['review_reasons'])
+    gaps=[{'engine':name,'status':row['status'],'reason':row.get('reason')} for name,row in results.items()
+          if name not in ('verdict','report') and row['status']!='COMPLETED']
     assessment=results.get('vulnerabilities',{}).get('data',{})
     affected=[f for f in assessment.get('findings',[]) if f.get('classification')=='CONFIRMED_AFFECTED']
     vulnerability_risk='CONFIRMED_AFFECTED' if affected else 'UNCERTAIN' if assessment.get('status')!='COMPLETED' or any(f.get('classification')!='NOT_AFFECTED' for f in assessment.get('findings',[])) else 'NO_MATCHING_AFFECTED_VERSIONS'
-    overall='MALWARE_FINDINGS' if score>=20 else 'KNOWN_VULNERABILITIES' if affected else 'INCOMPLETE_EVIDENCE' if gaps or vulnerability_risk=='UNCERTAIN' else 'LOW_OBSERVED_RISK'
-    return {'security':state,'score':min(score,100),'confidence':'MEDIUM' if state!='INCONCLUSIVE' else 'LOW','reasons':reasons,'coverage_gaps':gaps,'approval_policy':criteria(),
+    overall='MALWARE_FINDINGS' if state=='MALICIOUS' else 'KNOWN_VULNERABILITIES' if affected else 'INCOMPLETE_EVIDENCE' if state=='MANUAL_REVIEW' or vulnerability_risk=='UNCERTAIN' else 'LOW_OBSERVED_RISK'
+    # Retain the numeric field for older clients; threshold policy is authoritative.
+    score=100 if state=='MALICIOUS' else 50 if decision['review_reasons'] or decision['detection_count']==decision['review_threshold'] else 0
+    return {**decision,'score':score,'confidence':'LOW' if state=='MANUAL_REVIEW' else 'MEDIUM',
+            'reasons':reasons,'coverage_gaps':gaps,'approval_policy':criteria(),
             'overall_risk':overall,'vulnerability_risk':vulnerability_risk,'confirmed_vulnerability_ids':[f['id'] for f in affected],
-            'policy_version':'1.1','ai':results.get('ai',{}).get('data',{}),'explanation':'No adverse evidence is not proof of safety or absence of vulnerabilities. Incomplete required analysis cannot yield a likely-benign verdict. AI indicators never increase the security score.'}
+            'policy_version':'2.0','ai':results.get('ai',{}).get('data',{})}

@@ -52,7 +52,7 @@ def test_upload_hash_duplicate_and_job(client):
     assert second['duplicate'] and second['sample_id']==r['sample_id']
     assert second['analysis_id']!=r['analysis_id']
     job=client.get('/api/analysis/'+r['analysis_id']).json()
-    assert job['status']=='QUEUED' and job['progress']==0 and len(job['engines'])==len(ENGINES)
+    assert job['status']=='QUEUED' and job['progress']==0 and len(job['engines'])==len(ENGINES)-3
     assert job['sample']['filename']=='good.exe'
     assert job['consent'] is False
     renamed=client.get('/api/analysis/'+second['analysis_id']).json()
@@ -64,6 +64,7 @@ def test_cross_origin_mutation_rejected(client):
 
 def test_settings_never_expose_secrets(client,monkeypatch):
     monkeypatch.setattr(settings,'virustotal_api_key','secret-needle')
+    monkeypatch.setattr(main,'check_provider',lambda name:{'name':name,'status':'NETWORK_UNAVAILABLE','message':'operator-only'})
     response=client.get('/api/settings')
     assert 'secret-needle' not in response.text
 
@@ -94,9 +95,9 @@ def test_real_pipeline_without_external_providers(client,monkeypatch):
     job=client.get('/api/analysis/'+id).json()
     assert job['status']=='COMPLETED' and job['progress']==100
     stages={s['name']:s for s in job['engines']}
-    assert stages['virustotal']['status']=='UNAVAILABLE'
-    assert stages['network']['status']=='UNAVAILABLE'
-    assert stages['verdict']['data']['security']=='INCONCLUSIVE'
+    assert 'virustotal' not in stages
+    assert 'network' not in stages
+    assert stages['verdict']['data']['security']=='MANUAL_REVIEW'
     assert stages['report']['status']=='COMPLETED'
     assert job['final_status']=='COMPLETED_WITH_GAPS'
     exported=client.get('/api/analysis/'+id+'/report').json()
@@ -107,10 +108,10 @@ def test_real_pipeline_without_external_providers(client,monkeypatch):
     assert exported['sample']['size']==len(pe())
     assert exported['steps'][-1]['status']=='COMPLETED'
     assert all(s['status'] not in ['RUNNING','QUEUED'] for s in exported['steps'])
-    assert exported['summary']['errors_or_gaps']==len(exported['errors'])
+    assert exported['summary']['errors_or_gaps']>0 and not exported.get('errors')
     assert not any(g['engine'] in ['verdict','report'] for g in exported['verdict']['coverage_gaps'])
     assert exported['vulnerability_assessment']['status']=='IDENTIFICATION_REQUIRED'
-    assert stages['dns']['status']=='UNAVAILABLE'
+    assert 'dns' not in stages
     assert storage.get('reports/'+id+'.pdf').startswith(b'%PDF-')
     pdf=client.get('/api/analysis/'+id+'/report.pdf')
     assert pdf.status_code==200 and pdf.content.startswith(b'%PDF-')
@@ -134,7 +135,7 @@ def test_report_write_failure_fails_job_and_remains_exportable(client,monkeypatc
     result=client.get('/api/analysis/'+identifier+'/report').json()
     assert result['status']=='FAILED' and result['final_status']=='FAILED'
     assert result['steps'][-1]['status']=='FAILED'
-    assert any(e['stage']=='report' for e in result['errors'])
+    assert result['approval']['recommendation']=='REVIEW_REQUIRED'
     assert all(s['status'] not in ['RUNNING','QUEUED'] for s in result['steps'])
 
 
@@ -234,3 +235,20 @@ def test_multipart_accepts_name_version_without_changing_uploaded_sample(client)
     assert job['software_identity']=={'name':'7-Zip','version':'16.00','vendor':''}
     assert response.json()['sha256']==hashlib.sha256(pe()).hexdigest()
     assert client.post('/api/samples',files={'file':('fixture.exe',pe())},data={'software_name':'7-Zip'}).status_code==422
+
+
+def test_unavailable_provider_hidden_from_analysis_and_raw_routes(client):
+    identifier=client.post('/api/samples',files={'file':('fixture.exe',pe())}).json()['analysis_id']
+    tasks.update(identifier,'virustotal','UNAVAILABLE',data={'diagnostic':{'message':'private connection detail'}},reason='private connection detail')
+    body=client.get('/api/analysis/'+identifier).json()
+    assert 'private connection detail' not in json.dumps(body)
+    assert 'virustotal' not in [e['name'] for e in body['engines']]
+    assert client.get('/api/analysis/'+identifier+'/virustotal').status_code==404
+    assert client.get('/api/analysis/'+identifier+'/virustotal/raw').status_code==404
+    assert tasks.snapshot(identifier)['virustotal']['reason']=='private connection detail'
+
+
+def test_settings_show_only_connected_integrations(client,monkeypatch):
+    monkeypatch.setattr(settings,'virustotal_api_key','configured')
+    monkeypatch.setattr(main,'check_provider',lambda name:{'name':name,'status':'CONNECTED' if name=='sandbox' else 'NETWORK_UNAVAILABLE'})
+    assert client.get('/api/settings').json()['providers']==[{'name':'sandbox','status':'CONNECTED'}]

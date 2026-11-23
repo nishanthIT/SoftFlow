@@ -9,6 +9,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, LongTable, 
 
 
 def render(report):
+    from .public_results import document
+    report = document(report)
     output = BytesIO(); styles = getSampleStyleSheet(); story = []
     styles['BodyText'].fontSize = 9; styles['BodyText'].leading = 13
     styles['BodyText'].splitLongWords = True
@@ -42,7 +44,12 @@ def render(report):
         ['Publisher / version',str(identity.get('vendor') or 'Unknown')+' / '+str(identity.get('version') or 'Unknown')],
         ['Architecture',identity.get('architecture') or data('static').get('architecture','Unknown')]], [105,410])
     section('Assessment')
-    add('Malware assessment: '+verdict.get('security','INCONCLUSIVE')+' · Score '+str(verdict.get('score','unknown')))
+    state=verdict.get('security','MANUAL_REVIEW')
+    styles.add(styles['Heading2'].clone('Verdict'))
+    styles['Verdict'].textColor=colors.HexColor({'LEGITIMATE':'#15803d','MALICIOUS':'#b91c1c'}.get(state,'#b45309'))
+    add('Malware assessment: '+state.replace('_',' ').title(),'Verdict')
+    if verdict.get('detection_count') is not None:add('Reported antivirus detections: '+str(verdict['detection_count']))
+    if verdict.get('explanation'):add(verdict['explanation'])
     if verdict.get('overall_risk'):add('Overall risk: '+verdict['overall_risk'].replace('_',' '))
     approval=report.get('approval',{})
     add('Recommendation: '+approval.get('recommendation','REVIEW_REQUIRED'))

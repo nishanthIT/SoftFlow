@@ -142,12 +142,12 @@ class SandboxProvider(ABC):
 
 class CuckooCapeProvider(SandboxProvider):
     def __init__(self):
-        if not cfg.cuckoo_api_url: raise Unavailable('No isolated Cuckoo/CAPE server is connected. Configure CUCKOO_API_URL and CUCKOO_API_TOKEN after preparing a Windows analysis VM.')
+        if not cfg.cuckoo_api_url: raise Unavailable('No isolated Cuckoo server is connected. Configure CUCKOO_API_URL and CUCKOO_API_TOKEN after preparing a Windows analysis VM.')
         if not cfg.sandbox_isolation_confirmed: raise Unavailable('Administrator must attest sandbox isolation and snapshot restoration')
         self.cape = cfg.sandbox_kind == 'cape'
         self.client = httpx.Client(base_url=cfg.cuckoo_api_url.rstrip('/')+'/',headers={'Authorization':('Token ' if self.cape else 'Bearer ')+cfg.cuckoo_api_token},timeout=cfg.request_timeout)
     def submit(self, data):
-        r = checked(sample_io.post(self.client,'tasks/create/file/' if self.cape else 'tasks/create/file',data,data={'timeout':'300','enforce_timeout':'1'}))
+        r = checked(sample_io.post(self.client,'tasks/create/file/' if self.cape else 'tasks/create/file',data,data={'timeout':str(cfg.sandbox_analysis_timeout),'enforce_timeout':'1','platform':cfg.sandbox_platform}))
         if r.get('error'): raise RuntimeError('Sandbox rejected submission')
         return r['data']['task_ids'][0] if self.cape else r['task_id']
     def get_status(self, task_id):

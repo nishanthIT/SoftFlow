@@ -9,7 +9,7 @@ LIMITATIONS = [
 
 
 def criteria():
-    return {'version': '1.1', 'max_approve_score': settings.approval_max_score,
+    return {'version': '2.0', 'detection_review_threshold': settings.detection_review_threshold, 'max_approve_score': settings.approval_max_score,
             'reject_score': settings.approval_reject_score,
             'require_reputation': settings.approval_require_reputation,
             'min_reputation_engines': settings.approval_min_reputation_engines,
@@ -47,19 +47,23 @@ def recommend(status, engines):
             if not present: gaps.append({'engine': name, 'status': 'EMPTY_EVIDENCE', 'reason': 'Completed flag has no usable evidence'})
     state = 'REVIEW_REQUIRED'
     score = finding.get('score', 0)
-    if status != 'COMPLETED' or gaps:
+    counted = finding.get('policy_version') == '2.0'
+    if counted and finding.get('security') == 'MALICIOUS':
+        state = 'REJECT'
+        reasons.append('Reported detections exceed the configured threshold.')
+    elif status != 'COMPLETED' or gaps:
         reasons.append('Analysis is incomplete, failed, unsupported, or missing required evidence.')
-    elif score >= rules['reject_score']:
+    elif not counted and score >= rules['reject_score']:
         state = 'REJECT'
         reasons.append(f"Malware score {score} meets rejection threshold {rules['reject_score']}.")
     else:
         stats = data('virustotal').get('stats', {})
         clean_votes = stats.get('harmless', 0) + stats.get('undetected', 0)
-        if finding.get('security')=='INCONCLUSIVE':
+        if finding.get('security') in ('INCONCLUSIVE','MANUAL_REVIEW'):
             reasons.append('The malware assessment is inconclusive and requires review.')
-        elif score > rules['max_approve_score'] or finding.get('security') != 'LIKELY_BENIGN':
+        elif (not counted and score > rules['max_approve_score']) or finding.get('security') not in ('LIKELY_BENIGN','LEGITIMATE'):
             reasons.append(f"Malware score {score} exceeds acceptance threshold {rules['max_approve_score']}; review the findings.")
-        elif finding.get('reasons'):
+        elif finding.get('reasons') and not counted:
             reasons.append('Adverse findings require review even when the configured score permits acceptance.')
         elif any(f.get('classification')!='NOT_AFFECTED' for f in data('vulnerabilities').get('findings',[])):
             reasons.append('Applicable or uncertain published vulnerabilities require review and remediation before approval.')
@@ -68,7 +72,7 @@ def recommend(status, engines):
         else:
             state = 'APPROVE'
             reasons.append('Required analysis and telemetry completed and meet the configured acceptance criteria.')
-            reasons.append(f"Malware score {score} is within acceptance threshold {rules['max_approve_score']}.")
+            reasons.append("Detection counts meet the captured threshold policy." if counted else f"Malware score {score} is within acceptance threshold {rules['max_approve_score']}.")
     return {'recommendation': state, 'analysis_status': status, 'reasons': reasons,
             'findings': finding.get('reasons', []), 'coverage_gaps': gaps, 'criteria': rules,
             'limitations': LIMITATIONS}

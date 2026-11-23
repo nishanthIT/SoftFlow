@@ -78,9 +78,19 @@ def check(name,refresh=False):
                     from .providers import windows_available
                     ready=windows_available(payload)
                     result['available_platforms']=payload
-                else:ready=bool(payload.get('machines',{}).get('available',0) or payload.get('data',{}).get('machines',{}).get('available',0))
-                result.update(execution_ready=ready and settings.sandbox_isolation_confirmed,isolation_confirmed=settings.sandbox_isolation_confirmed)
+                elif settings.sandbox_kind=='cuckoo':
+                    inventory=httpx.get(settings.cuckoo_api_url.rstrip('/')+'/machines/list',headers=headers,timeout=min(settings.request_timeout,10))
+                    inventory.raise_for_status()
+                    machines=inventory.json().get('machines')
+                    if not isinstance(machines,list):raise ValueError('Invalid Cuckoo machine inventory')
+                    # Busy Windows guests still accept queued work. An empty
+                    # inventory or Linux-only inventory is never execution-ready.
+                    ready=any(isinstance(m,dict) and m.get('platform')=='windows' for m in machines)
+                else:ready=bool(payload.get('machines',{}).get('total',0) or payload.get('data',{}).get('machines',{}).get('total',0))
+                core_ready=not (settings.sandbox_kind=='cuckoo' and isinstance(payload.get('processes'),dict) and not payload['processes'].get('cuckoo'))
+                result.update(core_running=core_ready,execution_ready=ready and core_ready and settings.sandbox_isolation_confirmed,isolation_confirmed=settings.sandbox_isolation_confirmed)
                 if not ready:result.update(status='NO_ANALYSIS_MACHINE',message='Cuckoo API connected, but no matching Windows analysis machine is available')
+                elif not core_ready:result.update(status='CORE_NOT_READY',message='Cuckoo API connected, but its core process is not running')
                 elif not settings.sandbox_isolation_confirmed:result.update(status='ISOLATION_REQUIRED',message='Cuckoo API connected; VM isolation and snapshot restoration must be verified before execution')
         except Exception as e:
             detail=diagnostic(name,e);result.update(status=detail['code'],message=detail['message'],retry_after_seconds=detail['retry_after_seconds'])

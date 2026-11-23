@@ -1,24 +1,24 @@
-"""Read-only credential checks. Never prints keys or account response bodies."""
-import httpx
-from .config import settings
+"""Operator-only connectivity diagnostics; no samples or credentials are printed."""
+from pathlib import Path
+import os
+import sys
+from dotenv import dotenv_values
+from .config import settings, Settings
+from .provider_status import check
+
 
 def main():
-    checks=[
-        ('VirusTotal',settings.virustotal_api_key,'https://www.virustotal.com/api/v3/users/'+settings.virustotal_api_key,{'x-apikey':settings.virustotal_api_key}),
-        ('Hybrid Analysis',settings.hybrid_analysis_api_key,'https://hybrid-analysis.com/api/v2/key/current',{'api-key':settings.hybrid_analysis_api_key,'User-Agent':'Falcon Sandbox','accept':'application/json'}),
-    ]
-    for name,key,url,headers in checks:
-        if not key:
-            print(name+': NOT CONFIGURED',flush=True)
-            continue
-        try:
-            response=httpx.get(url,headers=headers,timeout=20)
-            if response.status_code==200:
-                print(name+': credentials accepted (HTTP 200)',flush=True)
-            else:
-                print(name+': credential check returned HTTP '+str(response.status_code),flush=True)
-        except httpx.RequestError as e:
-            print(name+': connection check failed ('+type(e).__name__+')',flush=True)
-    print('No samples or sample hashes were submitted.',flush=True)
+    root=Path(__file__).resolve().parents[2]
+    sys.path.insert(0,str(root/'scripts'))
+    from existing_cuckoo import configure
+    values={**{k:v for k,v in dotenv_values(root/'.env').items() if v is not None},**os.environ}
+    configure(values,root)
+    resolved=Settings(**{k.lower():v for k,v in values.items()})
+    for key,value in resolved.model_dump().items():setattr(settings,key,value)
+    for name in ('sandbox','virustotal','hybrid-analysis'):
+        result=check(name,refresh=True)
+        print(result['name']+': '+result['status']+' — '+result.get('message',''),flush=True)
+    print('No samples were submitted.',flush=True)
+
 
 if __name__=='__main__': main()

@@ -23,11 +23,6 @@ def main():
             'import sys;sys.path.insert(0,"scripts");from provision import dependencies;dependencies()'], cwd=ROOT, check=True)
         if not (ROOT / '.env').exists():
             subprocess.run([str(python), 'scripts/configure_local.py'], cwd=ROOT, check=True)
-        if '--dev' not in sys.argv:
-            # An optional sandbox is independent of the production runtime.
-            subprocess.run([str(python),'-c',
-                "from dotenv import dotenv_values,set_key;v=dotenv_values('.env');"
-                "set_key('.env','SANDBOX_ENABLED','false') if 'SANDBOX_ENABLED' not in v else None"],cwd=ROOT,check=True)
 
 if __name__ == '__main__':
     try:

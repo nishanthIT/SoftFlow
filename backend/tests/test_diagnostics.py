@@ -30,3 +30,21 @@ def test_health_invalid_key_not_connected(monkeypatch):
     d=check('virustotal',refresh=True)
     assert d['configured'] and d['status']=='INVALID_API_KEY'
     assert 'invalid-test-key' not in str(d)
+
+@pytest.mark.parametrize('machines,processes,expected',[
+    ([],{'cuckoo':[123]},'NO_ANALYSIS_MACHINE'),
+    ([{'platform':'linux'}],{'cuckoo':[123]},'NO_ANALYSIS_MACHINE'),
+    ([{'platform':'windows','locked':True}],{'cuckoo':[123]},'CONNECTED'),
+    ([{'platform':'windows'}],{},'CORE_NOT_READY'),
+])
+def test_classic_cuckoo_machine_inventory(monkeypatch,machines,processes,expected):
+    monkeypatch.setattr(settings,'sandbox_kind','cuckoo')
+    monkeypatch.setattr(settings,'cuckoo_api_url','http://localhost:8090')
+    monkeypatch.setattr(settings,'sandbox_isolation_confirmed',True)
+    def get(url,**kwargs):
+        data={'machines':machines} if url.endswith('/machines/list') else {'machines':{'available':0},'processes':processes}
+        return httpx.Response(200,json=data,request=httpx.Request('GET',url))
+    monkeypatch.setattr(httpx,'get',get)
+    result=check('sandbox',refresh=True)
+    assert result['status']==expected
+    assert result['execution_ready']==(expected=='CONNECTED')

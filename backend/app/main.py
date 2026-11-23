@@ -15,6 +15,7 @@ from .models import record_models
 from . import storage, uploads, sample_io
 from .provider_status import sanitize, check as check_provider
 from .reporting import build_report, outcome
+from .public_results import document as public_document, clean as public_clean
 from .approval import recommend, criteria
 from .lifecycle import storage_guard
 from .retention import expiration
@@ -156,7 +157,7 @@ def sample(id:str):
         row=db.get(Sample,id)
         if not row: raise HTTPException(404,'Sample not found')
         return {**serialize(row),'analyses':[serialize(j) for j in db.scalars(select(Job).where(Job.sample_id==id).order_by(Job.created_at.desc()))]}
-def analysis_data(id):
+def analysis_data(id, public=True):
     with Session() as db:
         j=db.get(Job,id)
         if not j: raise HTTPException(404,'Analysis not found')
@@ -166,13 +167,14 @@ def analysis_data(id):
         sample['filename']=j.submitted_filename or sample['filename']
         reviews=record_models['analyst_reviews']
         decisions=[serialize(r) for r in db.scalars(select(reviews).where(reviews.analysis_id==id).order_by(reviews.created_at.desc(),reviews.id.desc()))]
-        return sanitize({**serialize(j),'approval':recommend(j.status,engines),'decisions':decisions,'final_status':outcome(j.status,engines),'sample':sample,'engines':engines,'progress':round(100*sum(e['status'] in TERMINAL for e in engines)/max(1,len(engines)))})
+        result=sanitize({**serialize(j),'approval':recommend(j.status,engines),'decisions':decisions,'final_status':outcome(j.status,engines),'sample':sample,'engines':engines,'progress':round(100*sum(e['status'] in TERMINAL for e in engines)/max(1,len(engines)))})
+        return public_document(result) if public else result
 @app.get('/api/analysis/{id}')
 @app.get('/api/analysis/{id}/status')
 def analysis(id:str): return analysis_data(id)
 @app.get('/api/analysis/{id}/report')
 def report(id:str,response:Response):
-    result=analysis_data(id)
+    result=analysis_data(id, public=False)
     if result['status'] not in ['COMPLETED','FAILED']:raise HTTPException(409,'Analysis is still running; export is available when processing ends')
     completed=next(e for e in result['engines'] if e['name']=='report')
     if completed['status']=='COMPLETED' and completed['data'].get('schema_version')=='2.0':
@@ -183,7 +185,7 @@ def report(id:str,response:Response):
         exported.setdefault('vulnerability_assessment',{'status':'NOT_PERFORMED','findings':[]})
     else: exported=build_report(result,result['sample'],result['engines'])
     response.headers['Content-Disposition']='attachment; filename="sentinelscan-'+result['id']+'.json"'
-    return sanitize(exported)
+    return sanitize(public_document(exported))
 
 @app.get('/api/analysis/{id}/report.pdf')
 def pdf_report(id:str):
@@ -230,7 +232,7 @@ def decide(id:str,body:Decision):
             'assessment':recommendation})
         db.add(entry);db.flush()
         db.add(Audit(action='analysis.decision',data={'analysis_id':id,'review_id':entry.id,'decision':body.decision}))
-        return sanitize(serialize(entry))
+        return sanitize(public_clean(serialize(entry)))
 @app.get('/api/analysis/{id}/events')
 async def events(id:str,request:Request):
     await asyncio.to_thread(analysis_data,id)
@@ -253,7 +255,7 @@ def engine_result(id:str,engine_name:str):
     return result
 @app.get('/api/settings')
 def config():
-    return {'presentation_mode':settings.presentation_mode,'authentication_required':False,'sandbox_enabled':settings.sandbox_enabled,'runtime':settings.app_env,'approval_policy':criteria(),'providers':[{'name':'VirusTotal','configured':bool(settings.virustotal_api_key)},{'name':'Hybrid Analysis','configured':bool(settings.hybrid_analysis_api_key)},{'name':'CAPE / Cuckoo','configured':bool(settings.cuckoo_api_url),'isolation_confirmed':settings.sandbox_isolation_confirmed}], 'external_uploads_enabled':settings.external_uploads_enabled,'max_upload_mb':settings.max_upload_mb,'secrets':'Managed through server environment; never returned to the browser'}
+    return {'presentation_mode':settings.presentation_mode,'authentication_required':False,'sandbox_enabled':settings.sandbox_enabled,'runtime':settings.app_env,'approval_policy':criteria(),'providers':connected_providers(), 'external_uploads_enabled':settings.external_uploads_enabled,'max_upload_mb':settings.max_upload_mb,'secrets':'Managed through server environment; never returned to the browser'}
 @app.get('/api/rules')
 def rules():
     paths=list(Path(settings.yara_path).glob('**/*.yar*'))
@@ -269,16 +271,22 @@ def health():
             checks[name]='CONNECTED'
         except Exception: checks[name]='UNAVAILABLE'
     return Response(json.dumps(checks),media_type='application/json',status_code=200 if all(v=='CONNECTED' for v in checks.values()) else 503)
+def connected_providers():
+    from concurrent.futures import ThreadPoolExecutor
+    names=['sandbox']
+    if settings.virustotal_api_key:names.append('virustotal')
+    if settings.hybrid_analysis_api_key:names.append('hybrid-analysis')
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results=list(pool.map(check_provider,names))
+    return [r for r in results if r['status']=='CONNECTED']
+
 @app.get('/health/providers')
 @app.get('/api/providers/health')
 def provider_health():
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        results=list(pool.map(check_provider,['virustotal','hybrid-analysis','sandbox']))
     from .tasks import celery
     try: workers=list((celery.control.inspect(timeout=1).ping() or {}).keys())
     except Exception: workers=[]
-    return {'providers':results,'workers':workers}
+    return {'providers':connected_providers(),'workers':workers}
 
 @app.get('/api/analysis/{id}/{engine_name}/raw')
 def raw_report(id:str,engine_name:str):

@@ -20,6 +20,7 @@ def runtime_signature():
     digest.update(Path(__file__).read_bytes())
     digest.update((root/'scripts/production.py').read_bytes())
     digest.update((root/'scripts/service.py').read_bytes())
+    digest.update((root/'scripts/existing_cuckoo.py').read_bytes())
     return digest.hexdigest()
 
 def configure_mode(presentation=False,development=False):
@@ -140,6 +141,13 @@ def stop():
     finally:save_running_state()
 
 def start_cuckoo(bootstrap=False):
+    if values.get('CUCKOO_MODE','existing')=='existing' and not bootstrap:
+        from existing_cuckoo import start_existing
+        try:return start_existing(sys.modules[__name__])
+        except (RuntimeError,OSError):
+            if values.get('CUCKOO_REQUIRED','true').lower()=='true':raise
+            message('CUCKOO','Execution could not start; continuing in explicitly requested partial mode')
+            return None
     if values.get('CUCKOO_AUTO_START','false').lower()!='true':
         message('CUCKOO','Using configured external sandbox; readiness will be checked through the application API');return
     message('CUCKOO','Checking pinned installation, virtualization, capture and guest prerequisites')
@@ -210,7 +218,11 @@ def main():
     if '--allow-degraded' in sys.argv:values['CUCKOO_REQUIRED']='false'
     presentation='--presentation' in sys.argv
     development='--dev' in sys.argv
+    from existing_cuckoo import configure as configure_existing
+    if not presentation:configure_existing(values,root)
     configure_mode(presentation,development)
+    # Backend modules in this manager and child processes must see the same resolved settings.
+    os.environ.update(values)
     if '--bootstrap-sandbox' in sys.argv:
         start_cuckoo(bootstrap=True);return 0
     try:
@@ -285,8 +297,8 @@ def main():
         from app.provider_status import check
         sandbox=check('sandbox')
         if values.get('CUCKOO_REQUIRED','true').lower()=='true' and not sandbox.get('execution_ready'):
-            raise RuntimeError('Sandbox execution health failed: '+str(sandbox.get('status','UNKNOWN'))+'. Inspect /api/providers/health and run npm run setup.')
-        message('VULNERABILITY','Intelligence lookups are checked per analysis; provider network failures remain visible in partial reports')
+            raise RuntimeError('Sandbox execution health failed: '+str(sandbox.get('status','UNKNOWN'))+'. Check .local/logs/cuckoo-core.log and run .venv-local/bin/python -m app.check_providers with PYTHONPATH=backend. An API plus an isolated bridge is not sufficient: Cuckoo needs a configured Windows guest and clean snapshot.')
+        message('VULNERABILITY','Intelligence lookups are checked per analysis; incomplete assessments require review; connection diagnostics stay in server logs')
         # Verify the same frontend/API route that a LAN browser uses.
         scheme='http'
         r=httpx.get(scheme+'://127.0.0.1:'+values['FRONTEND_PORT']+'/api/settings',timeout=60);r.raise_for_status()

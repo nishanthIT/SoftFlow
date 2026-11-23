@@ -35,7 +35,8 @@ def build_report(job, sample, engines, generated_at=None):
                'message': e.get('reason') or 'Stage did not complete successfully'}
               for e in ordered if e['status'] in TERMINAL - {'COMPLETED'}]
     verdict = next((e['data'] for e in ordered if e['name'] == 'verdict'), {})
-    return {
+    from .public_results import document
+    return document({
         'schema_version': '2.0', 'analysis_id': job['id'], 'id': job['id'],
         'status': job['status'], 'final_status': outcome(job['status'], ordered),
         'created_at': job.get('created_at'), 'started_at': job.get('started_at'),
@@ -56,4 +57,4 @@ def build_report(job, sample, engines, generated_at=None):
         'limitations': ['Job completion means processing ended; it does not mean every engine succeeded or that the file is safe.',
                        'Sandbox snapshot restoration is managed by the configured machinery and requires operator verification.',
                        'Provider evidence may include background activity and may omit encrypted traffic or raw API calls.', *LIMITATIONS],
-    }
+    })
