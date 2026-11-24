@@ -2,6 +2,8 @@
 
 # SentinelScan — setup and operation
 
+For PM2 deployments, use the [PM2 setup and restart procedure](docs/pm2.md). It preserves the separate Cuckoo API process.
+
 Analyze Windows EXE files with static inspection, YARA, reputation providers, and an isolated Cuckoo guest. Review the evidence, record an approval decision, and download the report. The private LAN workspace opens directly without a login. Static analysis and reports work independently of Cuckoo.
 
 ## Start the private LAN application

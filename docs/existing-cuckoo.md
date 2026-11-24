@@ -1,6 +1,9 @@
 # Reuse the Cuckoo server already installed on Kali
 
 `./start` / `./start.sh` / `npm start` all use the same application launcher.
+For an installation managed by PM2, use the [PM2 update procedure](pm2.md) and
+`ecosystem.config.cjs`; the `auto-scan` entry remains in the foreground and the
+existing `cuckoo-api` entry is reused independently.
 Existing mode does not install another sandbox, run VMCloak, redefine libvirt networks,
 change firewall rules, reset snapshots, or rewrite Cuckoo's configuration.
 CAPE and Docker are not required for this native deployment.

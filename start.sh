@@ -7,4 +7,12 @@ if [[ ${1:-} == --prepared-app ]]; then
 else
   python3 scripts/prepare_app.py "$@"
 fi
+foreground=false
+[[ -n ${pm_id:-} ]] && foreground=true
+for argument in "$@"; do
+  [[ $argument == --foreground ]] && foreground=true
+done
+if [[ $foreground == true ]]; then
+  exec .venv-local/bin/python scripts/service.py run "$@"
+fi
 exec .venv-local/bin/python scripts/local.py start "$@"

@@ -234,7 +234,7 @@ def main():
             server,signature=frontend_release(values)
             values['FRONTEND_RELEASE']=signature
             env.update(values)
-        if '--no-supervisor' not in sys.argv and 'supervisor' in state and alive(state['supervisor']) and state['supervisor'].get('runtime_signature')!=runtime_signature():
+        if 'supervisor' in state and alive(state['supervisor']) and ('--foreground-start' in sys.argv or ('--no-supervisor' not in sys.argv and state['supervisor'].get('runtime_signature')!=runtime_signature())):
             stop_services(['supervisor'],30)
         if any(name in APP_SERVICES and alive(item) and item.get('runtime_signature')!=runtime_signature() for name,item in state.items()):
             message('APP','Code or runtime mode changed; draining managed application services before restart')
@@ -326,13 +326,14 @@ def main():
             from production import prune_releases
             prune_releases(values['FRONTEND_RELEASE'])
         (run/'stopped').unlink(missing_ok=True)
-        if not development and '--no-supervisor' not in sys.argv:
+        if not development and '--no-supervisor' not in sys.argv and '--foreground-start' not in sys.argv:
             with (run/'supervisor.lock').open('a') as supervisor_lock:
                 try:fcntl.flock(supervisor_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
                 except BlockingIOError:message('OK','Existing production supervisor is active')
                 else:
                     fcntl.flock(supervisor_lock,fcntl.LOCK_UN)
-                    start('supervisor',[py,str(root/'scripts/service.py'),'watch','--existing'])
+                    startup_args=[flag for flag in ('--presentation','--allow-degraded') if flag in sys.argv]
+                    start('supervisor',[py,str(root/'scripts/service.py'),'watch','--existing',*startup_args])
         return 0
     except Exception as e:
         # Process errors only; connection URLs/passwords never printed.
@@ -341,4 +342,8 @@ def main():
         return 1
 
 
-if __name__=='__main__':sys.exit(main())
+if __name__=='__main__':
+    # Allow build cleanup/finally blocks to run if PM2 cancels startup.
+    def terminate(signum,frame):raise SystemExit(128+signum)
+    signal.signal(signal.SIGTERM,terminate)
+    sys.exit(main())

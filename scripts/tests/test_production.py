@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import sys
 import time
+import subprocess
+import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import local
@@ -78,3 +80,57 @@ def test_user_service_pins_terminal_node_and_validates_before_stopping(tmp_path,
     assert 'Environment="PATH=/opt/node version/bin:' in text
     assert calls[0]==['systemd-analyze','--user','verify',str(unit)]
     assert calls[1][-1]=='stop'
+
+
+@pytest.mark.parametrize('failure',[None,subprocess.CalledProcessError,KeyboardInterrupt])
+def test_build_restores_tracked_configuration_on_success_failure_and_interrupt(tmp_path,monkeypatch,failure):
+    frontend=tmp_path/'frontend';frontend.mkdir()
+    config=frontend/'tsconfig.json';original=b'{ "include": ["src/**/*.tsx", ".next/types/**/*.ts"] }\n'
+    config.write_bytes(original)
+    types=frontend/'next-env.d.ts';types.write_bytes(b'// original declarations\n')
+    monkeypatch.setattr(production,'ROOT',tmp_path)
+    monkeypatch.setattr(production,'source_signature',lambda values:'a'*24)
+    calls=[]
+    def build(*args,**kwargs):
+        calls.append(args)
+        release=frontend/kwargs['env']['NEXT_DIST_DIR']
+        assert json.loads(config.read_text())['include']==['src/**/*.tsx',kwargs['env']['NEXT_DIST_DIR']+'/types/**/*.ts']
+        config.write_text('{"include":["build generated"]}')
+        types.write_text('// changed by Next.js')
+        if failure is subprocess.CalledProcessError:raise failure(1,['npm','run','build'])
+        if failure is KeyboardInterrupt:raise failure()
+        (release/'standalone').mkdir(parents=True)
+        (release/'standalone/server.js').write_text('// server')
+        (release/'BUILD_ID').write_text('fixture')
+        (release/'static').mkdir()
+        (release/'static/chunk.js').write_text('// asset')
+    monkeypatch.setattr(production.subprocess,'run',build)
+    values={'API_INTERNAL_URL':'http://127.0.0.1:8100'}
+    if failure:
+        with pytest.raises(failure):production.frontend_release(values)
+        assert not (frontend/('.next-releases/'+'a'*24)/'release.json').exists()
+    else:
+        server,signature=production.frontend_release(values)
+        assert server.is_file()
+        assert (server.parent/'.next-releases'/signature/'static/chunk.js').read_text()=='// asset'
+        assert production.frontend_release(values)==(server,signature)
+        assert len(calls)==1  # Restarts reuse the verified release.
+    assert config.read_bytes()==original
+    assert types.read_bytes()==b'// original declarations\n'
+
+
+def test_failed_build_does_not_leave_generated_types_or_valid_release_marker(tmp_path,monkeypatch):
+    frontend=tmp_path/'frontend';frontend.mkdir()
+    config=frontend/'tsconfig.json';config.write_text('{"include":[]}')
+    release=frontend/'.next-releases'/('b'*24);release.mkdir(parents=True)
+    (release/'release.json').write_text('{}')
+    monkeypatch.setattr(production,'ROOT',tmp_path)
+    monkeypatch.setattr(production,'source_signature',lambda values:'b'*24)
+    def build(*args,**kwargs):
+        (frontend/'next-env.d.ts').write_text('// newly generated')
+    monkeypatch.setattr(production.subprocess,'run',build)
+    with pytest.raises(RuntimeError,match='outputFileTracingRoot'):
+        production.frontend_release({'API_INTERNAL_URL':'http://127.0.0.1:8100'})
+    assert not (release/'release.json').exists()
+    assert not (frontend/'next-env.d.ts').exists()
+    assert config.read_text()=='{"include":[]}'
