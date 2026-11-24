@@ -38,5 +38,5 @@ def test_pdf_is_real_readable_and_treats_untrusted_markup_as_text(tmp_path):
     if shutil.which('pdftotext'):
         pdf=tmp_path/'report.pdf';pdf.write_bytes(data)
         text=subprocess.check_output(['pdftotext',str(pdf),'-'],text=True)
-        assert 'CVE-FIXTURE' in text and 'Guest unavailable' in text and 'Untrusted advisory text' in text
+        assert 'CVE-FIXTURE' in text and 'Guest unavailable' not in text and 'manual review is needed' in text and 'Untrusted advisory text' in text
         assert 'file:///private' in text and 'not executed' in text

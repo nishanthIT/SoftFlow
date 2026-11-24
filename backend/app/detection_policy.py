@@ -52,7 +52,7 @@ def assess(results):
     if count is not None and count > threshold:
         state = 'MALICIOUS'
     elif not complete or conflicts or count == threshold:
-        state = 'MANUAL_REVIEW'
+        state = 'PARTIAL'
     else:
         state = 'LEGITIMATE'
     return {'security':state, 'detection_count':count, 'detection_sources':counts,
@@ -60,4 +60,4 @@ def assess(results):
             'required_evidence_complete':bool(complete), 'review_reasons':conflicts,
             'explanation':f'Fewer than {threshold} reported antivirus detections qualify as legitimate when required analysis is complete and findings do not conflict. '
                           f'Exactly {threshold} detections, conflicting findings, or partial evidence require manual review; more than {threshold} detections are malicious. '
-                          'Cuckoo-only analyses can qualify after completed execution with no adverse findings. This classification is not a guarantee of safety.'}
+                          'Analyses without antivirus counts can qualify after completed execution with no adverse findings. This classification is not a guarantee of safety.'}

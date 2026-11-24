@@ -1,11 +1,10 @@
 'use client';
 import {human,size} from '@/lib/api';
-import {JsonEvidence} from './common';
 
 export function NetworkEvidence({name,data:d}:{name:string;data:Record<string,any>}){
   const events=name==='dns'?[...(d.queries||[]),...(d.responses||[])]:d.events||[];
   return <>
-    <p>Monitoring: {human(d.monitoring_status||'UNAVAILABLE')} · Traffic: {human(d.traffic_status||'UNKNOWN')}</p>
+    {d.monitoring_status&&<p>Monitoring: {human(d.monitoring_status)}{d.traffic_status&&<> · Traffic: {human(d.traffic_status)}</>}</p>}
     <p>Network policy: {human(d.network_policy||'unknown')}{d.network_policy==='blocked'?' · External access is intentionally blocked. Captured attempts may still appear.':''}</p>
     {d.capture_scope&&<p>{d.capture_scope}</p>}
     {d.limitations&&<p>{d.limitations}</p>}
@@ -16,5 +15,5 @@ export function NetworkEvidence({name,data:d}:{name:string;data:Record<string,an
 
 export function SandboxArtifacts({data:d}:{data:Record<string,any>}){
   const artifacts=d.artifacts||{};
-  return <>{artifacts.files?.length>0&&<><h3>Collected artifacts</h3><ul>{artifacts.files.map((f:any,index:number)=><li key={index}>{typeof f.download_url==='string'&&f.download_url.startsWith('/api/analysis/')?<a href={f.download_url} download>{f.name}</a>:f.name} · {size(f.size)} · {f.kind}</li>)}</ul></>}{artifacts.errors?.length>0&&<><h3>Artifact collection gaps</h3><JsonEvidence data={artifacts.errors}/></>}</>;
+  return <>{artifacts.files?.length>0&&<><h3>Collected artifacts</h3><ul>{artifacts.files.map((f:any,index:number)=><li key={index}>{typeof f.download_url==='string'&&f.download_url.startsWith('/api/analysis/')?<a href={f.download_url} download>{f.name}</a>:f.name} · {size(f.size)} · {f.kind}</li>)}</ul></>}</>;
 }

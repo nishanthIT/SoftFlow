@@ -15,7 +15,7 @@ from .models import record_models
 from . import storage, uploads, sample_io
 from .provider_status import sanitize, check as check_provider
 from .reporting import build_report, outcome
-from .public_results import document as public_document, clean as public_clean
+from .public_results import document as public_document, clean as public_clean, security_state
 from .approval import recommend, criteria
 from .lifecycle import storage_guard
 from .retention import expiration
@@ -149,7 +149,7 @@ def samples(limit:int=50,offset:int=0):
         for s in rows:
             j=db.scalar(select(Job).where(Job.sample_id==s.id).order_by(Job.created_at.desc()))
             v=db.scalar(select(Engine).where(Engine.analysis_id==j.id,Engine.name=='verdict')) if j else None
-            result.append({**serialize(s),**(expiration(j) if j else {}),'latest_analysis_id':j.id if j else None,'status':j.status if j else None,'verdict':v.data.get('security') if v else None})
+            result.append({**serialize(s),**(expiration(j) if j else {}),'latest_analysis_id':j.id if j else None,'status':j.status if j else None,'verdict':security_state(v.data.get('security') if v else None)})
         return result
 @app.get('/api/samples/{id}')
 def sample(id:str):
@@ -182,7 +182,6 @@ def report(id:str,response:Response):
         except Exception:raise HTTPException(503,'Stored report is unavailable; retry after checking report storage')
         exported.setdefault('approval',result['approval'])
         exported['decisions']=result['decisions']
-        exported.setdefault('vulnerability_assessment',{'status':'NOT_PERFORMED','findings':[]})
     else: exported=build_report(result,result['sample'],result['engines'])
     response.headers['Content-Disposition']='attachment; filename="sentinelscan-'+result['id']+'.json"'
     return sanitize(public_document(exported))

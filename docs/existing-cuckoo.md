@@ -45,6 +45,21 @@ existing Python 2.7 Cuckoo. Leave `CUCKOO_API_TOKEN` empty to discover that inst
 token instead of reusing a token from the separate Cuckoo 3 installation. Edit existing
 entries in place so each setting appears only once.
 
+In particular, delete a later `CUCKOO_CWD='.local/cuckoo'` line: the later value wins
+and directs token discovery to the wrong installation even when the correct path
+appears above it. Delete the later `CUCKOO_AUTO_START='true'` line and duplicate
+`SANDBOX_KIND`/`SANDBOX_ENABLED` entries as well. The old managed-only
+`CUCKOO_PYTHON`, `CUCKOO_VENV`, `CUCKOO_INTERFACE`, `CUCKOO_RESULTSERVER_IP`,
+`CUCKOO_TCPDUMP`, and `CUCKOO_BRIDGE_HELPER` entries can be removed from this app's
+`.env`; existing mode preserves the real Cuckoo network/configuration independently.
+
+If token discovery finds no token, the client omits the Authorization header. An API
+that requires authentication then reports `API_TOKEN_REQUIRED`, with instructions to
+check `CUCKOO_CWD` or set `CUCKOO_API_TOKEN`. It never sends an empty `Bearer ` header.
+An older client may report `NETWORK_UNAVAILABLE (LocalProtocolError)` for this case;
+correct the CWD/token settings and update the authentication-header fix. Do not disable
+authentication on Cuckoo to work around a missing application token.
+
 Keep `ALLOWED_ORIGINS` as a JSON list, for example
 `ALLOWED_ORIGINS=["http://localhost:3100","http://127.0.0.1:3100"]`.
 The provider diagnostic command uses the same settings parser as application startup.
@@ -107,23 +122,40 @@ Hybrid Analysis `av_detect` rates, severity scores and Cuckoo scores are not eng
 
 - Below the configured threshold (default 3): **Legitimate**, green, when required execution
   and telemetry are complete and there are no conflicting behavioral/rule findings.
-- Exactly the threshold: **Manual review needed**, amber.
+- Exactly the threshold: **Partial**, amber; manual review needed.
 - Above the threshold: **Malicious**, red.
 - Missing execution, empty telemetry, invalid counts, or conflicting non-count findings:
-  **Manual review needed**. No result is never treated as zero detections.
+  **Partial**, with manual review needed. Missing results are never treated as zero detections.
 
 Cuckoo-only scans can qualify as legitimate after completed execution with no adverse
 findings; the antivirus count is left blank, not fabricated. Vulnerability remediation
 and workspace approval remain separate from malware classification. Changing
 `DETECTION_REVIEW_THRESHOLD` takes effect for new analyses after `./start`; historical
-verdicts and approval criteria are retained as originally recorded.
+verdicts and approval criteria are retained as originally recorded. Historical verdict
+labels are displayed as Legitimate, Malicious or Partial without rewriting the evidence.
 
 Unavailable integrations and their connection diagnostics are omitted from public
 settings, analysis/SSE payloads, raw-result routes, JSON exports and PDF reports. Completed
-results and available partial vulnerability findings remain visible. Partial/manual-review
+results and available partial vulnerability findings remain visible. Partial
 status remains visible without naming failed integrations. Detailed diagnostic rows stay in
 the server database and logs. Legacy stored JSON reports receive the same public filtering
 when downloaded; no old failure is relabeled as a clean result.
 
 Official protocol references: [Cuckoo 2 REST API](https://cuckoo.readthedocs.io/en/latest/usage/api/)
 and [Cuckoo 3 documentation](https://cuckoo-hatch.cert.ee/static/docs/).
+
+## Update the existing server
+
+After this change has been pushed to Git, update the existing server checkout:
+
+```bash
+cd ~/Auto_soft/SoftFlow
+git pull --ff-only
+./stop.sh
+./start
+```
+
+The native launcher rebuilds the frontend and restarts the API/workers. This
+display change needs no new environment variable or database migration. Keep
+the existing Cuckoo connection settings above. Reload open browser tabs after
+the restart.

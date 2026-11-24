@@ -97,7 +97,7 @@ def test_real_pipeline_without_external_providers(client,monkeypatch):
     stages={s['name']:s for s in job['engines']}
     assert 'virustotal' not in stages
     assert 'network' not in stages
-    assert stages['verdict']['data']['security']=='MANUAL_REVIEW'
+    assert stages['verdict']['data']['security']=='PARTIAL'
     assert stages['report']['status']=='COMPLETED'
     assert job['final_status']=='COMPLETED_WITH_GAPS'
     exported=client.get('/api/analysis/'+id+'/report').json()
@@ -110,7 +110,7 @@ def test_real_pipeline_without_external_providers(client,monkeypatch):
     assert all(s['status'] not in ['RUNNING','QUEUED'] for s in exported['steps'])
     assert exported['summary']['errors_or_gaps']>0 and not exported.get('errors')
     assert not any(g['engine'] in ['verdict','report'] for g in exported['verdict']['coverage_gaps'])
-    assert exported['vulnerability_assessment']['status']=='IDENTIFICATION_REQUIRED'
+    assert 'vulnerability_assessment' not in exported
     assert 'dns' not in stages
     assert storage.get('reports/'+id+'.pdf').startswith(b'%PDF-')
     pdf=client.get('/api/analysis/'+id+'/report.pdf')
@@ -207,7 +207,7 @@ def test_final_report_appends_decision_history_without_changing_evidence(client)
     assert result['approval']['recommendation']=='REVIEW_REQUIRED'
     assert len(result['decisions'])==2 and result['decisions'][0]['data']['decision']=='REJECT'
     assert all(e['status']=='FAILED' for e in result['engines'])
-    assert result['vulnerability_assessment']['status']=='NOT_PERFORMED'
+    assert 'vulnerability_assessment' not in result
 
 
 def test_certificate_feature_is_available_without_login(client):
@@ -246,6 +246,43 @@ def test_unavailable_provider_hidden_from_analysis_and_raw_routes(client):
     assert client.get('/api/analysis/'+identifier+'/virustotal').status_code==404
     assert client.get('/api/analysis/'+identifier+'/virustotal/raw').status_code==404
     assert tasks.snapshot(identifier)['virustotal']['reason']=='private connection detail'
+
+
+@pytest.mark.parametrize('old,new', [('INCONCLUSIVE','PARTIAL'),('MANUAL_REVIEW','PARTIAL'),('LIKELY_BENIGN','LEGITIMATE'),('LIKELY_MALICIOUS','MALICIOUS')])
+def test_historical_verdict_projection_covers_samples_stream_and_saved_exports(client,old,new):
+    from app.models import Job
+    identifier=client.post('/api/samples',files={'file':('legacy.exe',pe())}).json()['analysis_id']
+    with main.Session.begin() as db:
+        db.get(Job,identifier).status='COMPLETED'
+    tasks.update(identifier,'verdict','COMPLETED',data={'security':old,'score':0})
+    tasks.update(identifier,'sandbox','UNAVAILABLE',data={'diagnostic':{'message':'offline-private-host'}},reason='offline-private-host')
+    tasks.update(identifier,'ai','COMPLETED',data={'status':'INCONCLUSIVE','indicators':[]})
+    tasks.update(identifier,'report','COMPLETED',data={'schema_version':'2.0'})
+    saved={'schema_version':'2.0','analysis_id':identifier,'status':'COMPLETED','final_status':'COMPLETED_WITH_GAPS',
+        'sample':{'filename':'legacy.exe'},'verdict':{'security':old},
+        'engines':[{'name':name,**row} for name,row in tasks.snapshot(identifier).items()],
+        'steps':[{'stage':'sandbox','status':'UNAVAILABLE','error':'offline-private-host'},
+                 {'stage':'verdict','status':'COMPLETED','error':None}],
+        'vulnerability_assessment':{'status':'NOT_PERFORMED'}}
+    stored=json.dumps(saved).encode();storage.put('reports/'+identifier+'.json',stored)
+    assert client.get('/api/samples').json()[0]['verdict']==new
+    path='/api/analysis/'+identifier
+    analysis=client.get(path).json()
+    assert next(e for e in analysis['engines'] if e['name']=='verdict')['data']['security']==new
+    assert not {'sandbox','ai'} & {e['name'] for e in analysis['engines']}
+    exported=client.get(path+'/report').json()
+    assert exported['verdict']['security']==new
+    assert 'vulnerability_assessment' not in exported
+    assert storage.get('reports/'+identifier+'.json')==stored  # Public projection does not rewrite history.
+    assert client.get(path+'/sandbox/raw').status_code==404
+    stream=client.get(path+'/events')
+    assert stream.status_code==200
+    streamed=json.loads(next(line[6:] for line in stream.text.splitlines() if line.startswith('data: ')))
+    assert streamed==analysis
+    for text in (json.dumps(analysis),json.dumps(exported),stream.text):
+        assert 'offline-private-host' not in text and 'INCONCLUSIVE' not in text and 'MANUAL_REVIEW' not in text
+    assert client.get(path+'/report.pdf').content.startswith(b'%PDF-')
+    assert client.post(path+'/decision',json={'decision':'APPROVE','reason':'Hidden failures cannot be ignored'}).status_code==409
 
 
 def test_settings_show_only_connected_integrations(client,monkeypatch):

@@ -53,7 +53,7 @@ def test_reject_and_intermediate_review():
 
 def test_cuckoo_score_needs_review_not_interpreted_as_engine_count():
     result=policy.verdict({'sandbox':{'status':'COMPLETED','data':{'source':'cuckoo3','report':{'tasks':[{'post':{'score':9}}]}}}})
-    assert result['score']==50 and result['security']=='MANUAL_REVIEW'
+    assert result['score']==50 and result['security']=='PARTIAL'
 
 
 def test_policy_snapshot_survives_configuration_change(monkeypatch):
@@ -63,8 +63,9 @@ def test_policy_snapshot_survives_configuration_change(monkeypatch):
     assert recommend('COMPLETED',engines)['recommendation']=='APPROVE'
 
 
-def test_inconclusive_finding_requires_review():
-    engines=evidence();next(e for e in engines if e['name']=='verdict')['data']['security']='INCONCLUSIVE'
+@pytest.mark.parametrize('security',['PARTIAL','INCONCLUSIVE','MANUAL_REVIEW'])
+def test_partial_or_legacy_finding_requires_review(security):
+    engines=evidence();next(e for e in engines if e['name']=='verdict')['data']['security']=security
     assert recommend('COMPLETED',engines)['recommendation']=='REVIEW_REQUIRED'
 
 

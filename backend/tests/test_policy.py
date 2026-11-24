@@ -13,7 +13,7 @@ def paths(monkeypatch):
 
 def test_missing_engines_never_clean():
     r=policy.verdict({'virustotal':{'status':'UNAVAILABLE','data':{},'reason':'Not configured'}})
-    assert r['security']=='MANUAL_REVIEW'
+    assert r['security']=='PARTIAL'
     assert r['coverage_gaps'][0]['status']=='UNAVAILABLE'
 
 def test_malicious_evidence_traceable():
@@ -26,18 +26,18 @@ def test_benign_requires_coverage():
     results=evidence(0)
     assert policy.verdict(results)['security']=='LEGITIMATE'
     results['sandbox']['status']='TIMEOUT'
-    assert policy.verdict(results)['security']=='MANUAL_REVIEW'
+    assert policy.verdict(results)['security']=='PARTIAL'
 
 def test_ai_never_increases_malware_score():
     r=policy.verdict({'ai':{'status':'COMPLETED','data':{'status':'DETECTED','providers':['OpenAI']}}})
-    assert r['score']==0 and r['security']=='MANUAL_REVIEW'
+    assert r['score']==0 and r['security']=='PARTIAL'
 
 def test_static_sdk_not_usage():
     r=policy.ai_detect({'strings':['openai.resources']},{},True,False)
     assert r['status']=='STATIC_INDICATOR_ONLY'
 
-def test_missing_capture_inconclusive():
-    assert policy.ai_detect({'strings':[]},{},True,False)['status']=='INCONCLUSIVE'
+def test_missing_capture_partial():
+    assert policy.ai_detect({'strings':[]},{},True,False)['status']=='PARTIAL'
     assert policy.ai_detect({'strings':[]},{'events':[]},True,True)['status']=='NOT_OBSERVED'
 
 def test_dns_is_not_proof():

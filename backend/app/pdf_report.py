@@ -9,7 +9,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, LongTable, 
 
 
 def render(report):
-    from .public_results import document
+    from .public_results import document, security_state
     report = document(report)
     output = BytesIO(); styles = getSampleStyleSheet(); story = []
     styles['BodyText'].fontSize = 9; styles['BodyText'].leading = 13
@@ -44,7 +44,7 @@ def render(report):
         ['Publisher / version',str(identity.get('vendor') or 'Unknown')+' / '+str(identity.get('version') or 'Unknown')],
         ['Architecture',identity.get('architecture') or data('static').get('architecture','Unknown')]], [105,410])
     section('Assessment')
-    state=verdict.get('security','MANUAL_REVIEW')
+    state=security_state(verdict.get('security'))
     styles.add(styles['Heading2'].clone('Verdict'))
     styles['Verdict'].textColor=colors.HexColor({'LEGITIMATE':'#15803d','MALICIOUS':'#b91c1c'}.get(state,'#b45309'))
     add('Malware assessment: '+state.replace('_',' ').title(),'Verdict')
@@ -54,7 +54,7 @@ def render(report):
     approval=report.get('approval',{})
     add('Recommendation: '+approval.get('recommendation','REVIEW_REQUIRED'))
     for reason in approval.get('reasons',[]):add(reason)
-    add('Vulnerability assessment: '+vulnerability.get('status','NOT_PERFORMED'))
+    if vulnerability: add('Vulnerability assessment: '+vulnerability['status'])
     if vulnerability.get('conclusion'):add(vulnerability['conclusion'])
     if identity.get('source'):add('Identity source: '+identity['source'])
     if vulnerability.get('reason'):add(vulnerability['reason'])
@@ -87,10 +87,9 @@ def render(report):
         for event in rows[:100]:add(short(event,700))
         if len(rows)>100:add(f'{len(rows)-100} additional observations are included in the JSON export.')
     artifacts=data('sandbox').get('artifacts',{})
-    if artifacts.get('files') or artifacts.get('errors'):
+    if artifacts.get('files'):
         section('Captured artifacts')
         for item in artifacts.get('files',[]):add(item['name']+' · '+str(item['size'])+' bytes · SHA-256 '+item['sha256'])
-        for item in artifacts.get('errors',[]):add('Unavailable artifact: '+item['name']+' ('+item['error']+')')
     section('Scope and retention')
     add('Files, reports and analysis history expire 7 days after creation. Running analyses are protected until execution finishes.')
     for limitation in report.get('limitations',[]):add(limitation)

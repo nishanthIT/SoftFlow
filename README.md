@@ -275,15 +275,15 @@ Back up the database, sample/report storage, guest artifacts and `.env` before m
 1. Upload a Windows x86/x64 `.exe`. Unsupported extensions, DLLs, architectures, malformed headers, and excessive uploads receive explicit errors. Duplicate bytes retain their sample history and get a new analysis ID with their submitted filename.
 2. PostgreSQL durably records the job; Celery beat dispatches it. Workers recheck sample hashes and persist each stage's timestamps, status, evidence, and errors.
 3. Cuckoo 3 submission uses `/submit/file`, Token authentication, a matching Windows platform/version, and a configured execution deadline. Its analysis ID and task IDs are retained. Completed reports must match the submitted SHA-256 and reported task identities. Unknown POST outcomes are never blindly resubmitted.
-4. The UI receives persisted status through SSE with polling fallback. Failed/unavailable/timed-out engines remain visible; a completed job can have coverage gaps.
+4. The UI receives persisted status through SSE with polling fallback. Unavailable integrations are hidden from analysis pages and exports; a completed job can still have partial evidence. Security verdicts use only **Legitimate**, **Malicious**, or **Partial**.
 5. Malware scoring and approval are separate. An approval recommendation includes criteria, findings, coverage gaps, reasons, and limitations. Record an explicit decision and reason in the analysis page. Approving through the API is also blocked unless the recommendation is **Approve**. Decision history is append-only in the existing review table.
-6. View the HTML report or download JSON/PDF. Both downloadable formats are generated automatically at completion. JSON includes every operation, source evidence, policy snapshot, recommendation, current decision history, errors, and limitations. Stored analysis evidence is unchanged by later decisions. An unavailable report store produces an explicit error.
+6. View the HTML report or download JSON/PDF. Both downloadable formats are generated automatically at completion. JSON includes available operations, source evidence, public policy criteria, recommendation, current decision history, and limitations. Unavailable sources and diagnostics are omitted from HTML, JSON and PDF; internal evidence and logs retain diagnostics. Older saved verdicts are displayed using the same three labels. Stored analysis evidence is unchanged by later decisions. An unavailable report store produces an explicit error.
 
 | Recommendation | Criteria |
 |---|---|
-| Approve | Completed job, required engines with usable evidence, no failed/timed-out stage, likely-benign malware assessment, no adverse findings, score within acceptance threshold, and configured reputation support |
-| Reject | Complete required evidence and score at or above rejection threshold |
-| Review required | Incomplete, unsupported, failed, timed out, missing/empty evidence, inconclusive assessment, intermediate risk, or insufficient reputation |
+| Approve | Completed job, required engines with usable evidence, no failed/timed-out stage, Legitimate malware assessment with no conflicting findings, and configured reputation support |
+| Reject | Reported antivirus detection count above the configured review threshold (historical score policies remain captured in older records) |
+| Review required | Incomplete, unsupported, failed, timed out, missing/empty evidence, Partial assessment, conflicting findings, or insufficient reputation |
 
 Configuration is captured in each new verdict. Changing it does not silently change existing recommendations. Historical jobs predating policy snapshots use the current policy when viewed.
 

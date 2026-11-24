@@ -59,8 +59,8 @@ def recommend(status, engines):
     else:
         stats = data('virustotal').get('stats', {})
         clean_votes = stats.get('harmless', 0) + stats.get('undetected', 0)
-        if finding.get('security') in ('INCONCLUSIVE','MANUAL_REVIEW'):
-            reasons.append('The malware assessment is inconclusive and requires review.')
+        if finding.get('security') in ('PARTIAL','INCONCLUSIVE','MANUAL_REVIEW'):
+            reasons.append('The malware assessment is partial and requires review.')
         elif (not counted and score > rules['max_approve_score']) or finding.get('security') not in ('LIKELY_BENIGN','LEGITIMATE'):
             reasons.append(f"Malware score {score} exceeds acceptance threshold {rules['max_approve_score']}; review the findings.")
         elif finding.get('reasons') and not counted:

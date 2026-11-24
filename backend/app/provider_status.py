@@ -2,6 +2,7 @@
 import hashlib,time,threading
 import httpx
 from .config import settings
+from .sandbox_auth import headers as sandbox_headers, InvalidSandboxToken
 
 NAMES={'virustotal':'VirusTotal','hybrid-analysis':'Hybrid Analysis','sandbox':'Cuckoo Sandbox'}
 _CACHE={};_LOCK=threading.Lock()
@@ -20,13 +21,20 @@ def diagnostic(name,error):
     label=NAMES.get(name,name)
     code='ANALYSIS_FAILED';state='FAILED';message=f'{label} analysis failed ({type(error).__name__})'
     retry_after=None
-    if isinstance(error,httpx.TimeoutException):
+    if isinstance(error,InvalidSandboxToken):
+        code='INVALID_API_TOKEN';message='Cuckoo API token contains invalid characters; check CUCKOO_API_TOKEN or the existing Cuckoo configuration'
+    elif isinstance(error,httpx.LocalProtocolError):
+        code='INVALID_REQUEST';message=f'{label} request configuration is invalid; check the API URL and credentials'
+    elif isinstance(error,httpx.TimeoutException):
         code='TIMEOUT';state='TIMEOUT';message=f'{label} API request timed out'
     elif isinstance(error,httpx.RequestError):
         code='NETWORK_UNAVAILABLE';state='UNAVAILABLE';message=f'{label} network/API unavailable ({type(error).__name__})'
     elif isinstance(error,httpx.HTTPStatusError):
         status=error.response.status_code
-        if status==401:code='INVALID_API_KEY';message=f'{label} authentication failed: invalid API key'
+        if status==401 and name=='sandbox' and not settings.cuckoo_api_token.strip():
+            code='API_TOKEN_REQUIRED';state='UNAVAILABLE'
+            message='Cuckoo API requires a token. Set CUCKOO_API_TOKEN or correct CUCKOO_CWD so [cuckoo] api_token can be read from conf/cuckoo.conf'
+        elif status==401:code='INVALID_API_KEY';message=f'{label} authentication failed: invalid API key'
         elif status==403:code='ACCESS_DENIED';message=f'{label} access denied: API key lacks permission for this operation'
         elif status==429:
             code='RATE_LIMITED';state='UNAVAILABLE';message=f'{label} rate limit reached'
@@ -58,6 +66,8 @@ def check(name,refresh=False):
     if name=='sandbox':result.update(execution_ready=False,isolation_confirmed=settings.sandbox_isolation_confirmed,kind=settings.sandbox_kind)
     from datetime import datetime,timezone
     if not configured:result.update(status='NOT_CONFIGURED',message=f'{NAMES[name]} '+('API URL is not configured' if name=='sandbox' else 'API key is not configured'))
+    elif name=='sandbox' and settings.sandbox_kind=='cuckoo3' and not key.strip():
+        result.update(status='API_TOKEN_REQUIRED',message='Cuckoo 3 requires CUCKOO_API_TOKEN')
     else:
         try:
             if name=='virustotal':
@@ -69,7 +79,7 @@ def check(name,refresh=False):
             else:
                 suffix='/submit/platforms' if settings.sandbox_kind=='cuckoo3' else '/cuckoo/status/' if settings.sandbox_kind=='cape' else '/cuckoo/status'
                 url=settings.cuckoo_api_url.rstrip('/')+suffix
-                headers={'Authorization':('Bearer ' if settings.sandbox_kind=='cuckoo' else 'Token ')+key}
+                headers=sandbox_headers(settings.sandbox_kind,key)
             r=httpx.get(url,headers=headers,timeout=min(settings.request_timeout,10));r.raise_for_status();payload=r.json()
             if not isinstance(payload,(dict,list)):raise ValueError('Unexpected response type')
             result.update(status='CONNECTED',message=f'{NAMES[name]} connected; authentication accepted')
@@ -99,7 +109,7 @@ def check(name,refresh=False):
             # an authenticated API with no scheduler from bad credentials.
             if name=='sandbox' and settings.sandbox_kind=='cuckoo3' and isinstance(e,httpx.HTTPStatusError) and e.response.status_code>=500:
                 try:
-                    probe=httpx.get(settings.cuckoo_api_url.rstrip('/')+'/analyses/',headers={'Authorization':'Token '+key},timeout=min(settings.request_timeout,10))
+                    probe=httpx.get(settings.cuckoo_api_url.rstrip('/')+'/analyses/',headers=sandbox_headers(settings.sandbox_kind,key),timeout=min(settings.request_timeout,10))
                     probe.raise_for_status()
                     if isinstance(probe.json().get('analyses'),list):
                         result.update(status='CORE_NOT_READY',message='Cuckoo API authenticated, but core has not supplied a usable machine inventory. Check Cuckoo core logs and host/VM prerequisites.')

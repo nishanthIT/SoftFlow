@@ -85,7 +85,7 @@ def ai_detect(static, net, static_ok, network_ok, observed_behavior=None):
                 indicators.append({'provider':'Local inference','type':'API_ENDPOINT_OBSERVED','source':'sandbox','evidence':event})
     confirmed=any(i['type'] in ['API_ENDPOINT_OBSERVED','LOCAL_INFERENCE'] for i in indicators)
     runtime=any(i['type'] in ['RUNTIME_CONNECTION','DNS_OBSERVED'] for i in indicators)
-    status='DETECTED' if confirmed else 'SUSPECTED' if runtime else 'STATIC_INDICATOR_ONLY' if indicators else 'NOT_OBSERVED' if static_ok and network_ok else 'INCONCLUSIVE'
+    status='DETECTED' if confirmed else 'SUSPECTED' if runtime else 'STATIC_INDICATOR_ONLY' if indicators else 'NOT_OBSERVED' if static_ok and network_ok else 'PARTIAL'
     return {'status':status,'confidence':'HIGH' if confirmed else 'MEDIUM' if runtime else 'LOW','providers':sorted({i['provider'] for i in indicators}), 'indicators':indicators[:1000],
             'limitations':'Static strings and SDKs do not prove usage. DNS alone does not prove an API call. Encrypted traffic and local model execution may be unobservable. Model and request content are not inferred.'}
 
@@ -101,10 +101,10 @@ def verdict(results):
     assessment=results.get('vulnerabilities',{}).get('data',{})
     affected=[f for f in assessment.get('findings',[]) if f.get('classification')=='CONFIRMED_AFFECTED']
     vulnerability_risk='CONFIRMED_AFFECTED' if affected else 'UNCERTAIN' if assessment.get('status')!='COMPLETED' or any(f.get('classification')!='NOT_AFFECTED' for f in assessment.get('findings',[])) else 'NO_MATCHING_AFFECTED_VERSIONS'
-    overall='MALWARE_FINDINGS' if state=='MALICIOUS' else 'KNOWN_VULNERABILITIES' if affected else 'INCOMPLETE_EVIDENCE' if state=='MANUAL_REVIEW' or vulnerability_risk=='UNCERTAIN' else 'LOW_OBSERVED_RISK'
+    overall='MALWARE_FINDINGS' if state=='MALICIOUS' else 'KNOWN_VULNERABILITIES' if affected else 'INCOMPLETE_EVIDENCE' if state=='PARTIAL' or vulnerability_risk=='UNCERTAIN' else 'LOW_OBSERVED_RISK'
     # Retain the numeric field for older clients; threshold policy is authoritative.
     score=100 if state=='MALICIOUS' else 50 if decision['review_reasons'] or decision['detection_count']==decision['review_threshold'] else 0
-    return {**decision,'score':score,'confidence':'LOW' if state=='MANUAL_REVIEW' else 'MEDIUM',
+    return {**decision,'score':score,'confidence':'LOW' if state=='PARTIAL' else 'MEDIUM',
             'reasons':reasons,'coverage_gaps':gaps,'approval_policy':criteria(),
             'overall_risk':overall,'vulnerability_risk':vulnerability_risk,'confirmed_vulnerability_ids':[f['id'] for f in affected],
             'policy_version':'2.0','ai':results.get('ai',{}).get('data',{})}

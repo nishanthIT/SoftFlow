@@ -12,12 +12,13 @@ export function ApprovalPanel({analysis}:{analysis:Analysis}) {
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState<Error|null>(null);
   const assessment=analysis.approval;
+  const vulnerability=analysis.engines.find(e=>e.name==='vulnerabilities')?.data;
   return <section className="panel evidence-panel approval-panel">
     <h2>Approval decision</h2>
     <p>Recommendation: <Badge state={assessment?.recommendation||'REVIEW_REQUIRED'}/></p>
     <p>Analysis status: {human(assessment?.analysis_status||analysis.status)}</p>
     <ul>{assessment?.reasons.map((r:string)=><li key={r}>{r}</li>)}</ul>
-    <p>No malicious behavior detected does not establish that software has no vulnerabilities. Vulnerability assessment: {human(analysis.engines.find(e=>e.name==='vulnerabilities')?.data.status||'NOT_PERFORMED')}.</p>
+    <p>No malicious behavior detected does not establish that software has no vulnerabilities.{vulnerability?.status&&<> Vulnerability assessment: {human(vulnerability.status)}.</>}</p>
     <details><summary>Decision criteria, findings and limitations</summary><JsonEvidence data={assessment}/></details>
     <h3>Record a workspace decision</h3>
     <form onSubmit={async e=>{

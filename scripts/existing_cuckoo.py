@@ -97,7 +97,7 @@ def start_existing(manager):
     while time.monotonic() < deadline:
         result = check('sandbox', refresh=True)
         if result.get('execution_ready'): return result
-        if result['status'] in ('ISOLATION_REQUIRED', 'INVALID_API_KEY', 'ACCESS_DENIED'): return result
+        if result['status'] in ('ISOLATION_REQUIRED', 'API_TOKEN_REQUIRED', 'INVALID_API_TOKEN', 'INVALID_REQUEST', 'INVALID_API_KEY', 'ACCESS_DENIED'): return result
         for name in ('cuckoo-api', 'cuckoo-core'):
             if name in manager.state and not manager.alive(manager.state[name]):
                 raise RuntimeError(name+' exited; inspect .local/logs/'+name+'.log. Existing network and guest configuration were preserved.')

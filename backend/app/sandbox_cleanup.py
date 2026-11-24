@@ -3,6 +3,7 @@ import hashlib
 import re
 import httpx
 from .config import settings
+from .sandbox_auth import headers as sandbox_headers
 
 
 class SandboxStillActive(Exception): pass
@@ -31,7 +32,7 @@ def delete_analysis(data, sha256):
     view=f'analysis/{task}' if kind=='cuckoo3' else f'tasks/view/{task}'+('/' if kind=='cape' else '')
     delete=f'analysis/{task}/deleteanalysis' if kind=='cuckoo3' else f'tasks/delete/{task}'+('/' if kind=='cape' else '')
     with httpx.Client(base_url=settings.cuckoo_api_url.rstrip('/')+'/',
-                      headers={'Authorization':('Bearer ' if kind=='cuckoo' else 'Token ')+settings.cuckoo_api_token},
+                      headers=sandbox_headers(kind,settings.cuckoo_api_token),
                       timeout=settings.request_timeout) as client:
         response=client.get(view)
         if response.status_code==404: return
